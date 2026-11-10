@@ -1,0 +1,37 @@
+# CHANGE REQUEST: frontend is now Member 1's job. Replace Step 4 and keep the Step 1 and Step 3 additions.
+
+## Step 1 additions (websocket-contract.md)
+1. Renegotiation rule: after the first connection, a peer that adds or removes a track (e.g. screen share) sends a NEW `offer` over the same RTCPeerConnection, and the other side answers. Use the "perfect negotiation" pattern: the polite peer is the one with the lexicographically smaller peerId. On an offer collision, the polite peer rolls back and accepts the incoming offer; the impolite peer ignores it. Add a short table and a second Mermaid diagram: "Peer A starts screen sharing -> renegotiation".
+2. New message `media-state` (client): `kind` ("camera" | "screen"), `active` (boolean), `streamId` (string). The server adds `from` and broadcasts it to the other peers without inspecting it. `peer-left` implies that peer's media-state is inactive.
+3. Add JSON examples for both and add `media-state` to the message table.
+
+## Step 3 additions (server)
+- Serve /realtime/reference-client as static files on the same port.
+- DEV-ONLY `POST /dev/token` with body {"username":"alice"} returning {"token":"<JWT>"}, signed per the token contract. Disabled when NODE_ENV === "production". Document it as a stand-in for Member 3's `POST /api/login`.
+- Relay `media-state` as described above.
+- Add CORS for http://localhost:* in dev only, because Member 1's frontend will run on a different port.
+
+## Step 4 (replaced): minimal TEST client, not the real UI
+Member 1 owns the real UI. This client only exists to test my server and to teach Member 1 the WebRTC flow. Do not polish it.
+
+Location: /realtime/reference-client/
+- `index.html`: one page with username + "Get token" (calls /dev/token), room name + Join, local and remote <video>, chat box, "Share screen" / "Stop sharing" buttons, and a debug log panel.
+- `js/signaling.js`: WebSocket wrapper (connect, send, on(type, cb)). No WebRTC in this file.
+- `js/peer.js`: RTCPeerConnection per remote peer: offer/answer, ICE, perfect negotiation, adding/removing the screen-share stream as a SEPARATE MediaStream, ICE servers as one constant at the top.
+- `js/media.js`: getUserMedia, getDisplayMedia, handling the track's `ended` event.
+- The log panel prints iceConnectionState, connectionState, signalingState, ICE candidate types (host/srflx/relay), rollbacks, and every signaling message sent/received.
+- Short comments on each step of the offer/answer and renegotiation flow. These three js files will be copied by Member 1, so keep them clean and independent of the HTML.
+
+## Test
+1. Two tabs, different usernames, same room: video, audio and chat work.
+2. Tab A shares its screen and B sees it as a separate stream while camera video continues.
+3. Stopping the share from the browser's own bar also ends it on B.
+4. Both tabs start sharing at the same moment: no deadlock.
+5. A third tab joining during a share sees it.
+
+## Updated definition of done
+- [ ] The contract includes the renegotiation rule and `media-state`, each with JSON example and diagram
+- [ ] POST /dev/token works and is disabled in production
+- [ ] All five tests pass
+- [ ] A README section: how to run the server, get a token, open the test client
+- [ ] List any place where you deviated from or extended the contract
