@@ -1,0 +1,16 @@
+{
+  "name": "webrtc-meeting-realtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebRTC meeting signaling server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "make:test-token": "node scripts/make-test-token.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "jsonwebtoken": "^9.0.2",
+    "ws": "^8.18.0"
+  }
+}

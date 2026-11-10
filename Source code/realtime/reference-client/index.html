@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebRTC Signaling Test Client</title>
+    <style>
+      body {
+        max-width: 900px;
+        margin: 24px auto;
+        padding: 0 16px;
+        font:
+          16px/1.45 system-ui,
+          sans-serif;
+      }
+
+      label {
+        display: inline-block;
+        margin: 5px;
+      }
+
+      input {
+        padding: 7px;
+      }
+
+      button {
+        padding: 7px 12px;
+        margin: 5px;
+      }
+
+      video {
+        width: min(100%, 380px);
+        background: #111;
+        margin: 5px;
+      }
+
+      #log {
+        height: 240px;
+        overflow: auto;
+        white-space: pre-wrap;
+        background: #111;
+        color: #ddd;
+        padding: 10px;
+      }
+
+      .tile {
+        display: inline-block;
+        vertical-align: top;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>WebRTC Signaling Test Client</h1>
+    <p>Open two or more tabs, use different usernames, and join the same room.</p>
+
+    <div>
+      <label>Username <input id="username" value="Alice" autocomplete="nickname" /></label>
+      <button id="get-token">Get token</button>
+      <label>Room <input id="room" value="demo-room" /></label>
+      <button id="join">Join</button>
+      <button id="leave" disabled>Leave</button>
+      <button id="share" disabled>Share screen</button>
+      <button id="stop-share" disabled>Stop sharing</button>
+    </div>
+    <p id="status">Get a development token to begin.</p>
+
+    <h2>Local media</h2>
+    <video id="local-video" autoplay muted playsinline></video>
+    <h2>Remote media</h2>
+    <div id="remote-media"></div>
+    <h2>Chat</h2>
+    <form id="chat-form">
+      <input id="chat-text" placeholder="Message" maxlength="4000" disabled />
+      <button id="send-chat" disabled>Send</button>
+    </form>
+    <div id="chat"></div>
+    <h2>Debug log</h2>
+    <pre id="log"></pre>
+
+    <script type="module">
+      import { SignalingClient } from './js/signaling.js';
+      import { PeerManager } from './js/peer.js';
+      import { MediaManager } from './js/media.js';
+
+      const byId = (id) => document.getElementById(id);
+      const logElement = byId('log');
+      const status = byId('status');
+      const remoteMedia = byId('remote-media');
+      const remoteElements = new Map();
+      let signaling = null;
+      let peerManager = null;
+      let media = null;
+      let token = '';
+      let room = '';
+      let selfPeerId = '';
+
+      function log(message) {
+        logElement.textContent += `${new Date().toLocaleTimeString()} ${message}\n`;
+        logElement.scrollTop = logElement.scrollHeight;
+      }
+
+      function showRemote({ peerId, streamId, kind, stream, active = true }) {
+        const key = `${peerId}:${streamId}`;
+        if (!active) {
+          remoteElements.get(key)?.wrapper.remove();
+          remoteElements.delete(key);
+          return;
+        }
+
+        let item = remoteElements.get(key);
+        if (!item) {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'tile';
+          const title = document.createElement('div');
+          const video = document.createElement('video');
+          video.autoplay = true;
+          video.playsInline = true;
+          video.dataset.kind = kind;
+          wrapper.append(title, video);
+          remoteMedia.append(wrapper);
+          item = { wrapper, title, video };
+          remoteElements.set(key, item);
+        }
+        item.title.textContent = `${kind}: ${peerId}`;
+        item.video.dataset.kind = kind;
+        item.video.srcObject = stream;
+      }
+
+      function announceMedia(kind, active, streamId) {
+        signaling?.send({ type: 'media-state', kind, active, streamId });
+      }
+
+      byId('get-token').addEventListener('click', async () => {
+        try {
+          const response = await fetch('/dev/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: byId('username').value }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.message || `HTTP ${response.status}`);
+          token = result.token;
+          status.textContent = 'Development token ready. Join a room.';
+          log(`Development token received for ${byId('username').value}.`);
+        } catch (error) {
+          status.textContent = `Could not get token: ${error.message}`;
+          log(`Token request failed: ${error.message}`);
+        }
+      });
+
+      byId('join').addEventListener('click', async () => {
+        if (!token) {
+          status.textContent = 'Get a token before joining.';
+          return;
+        }
+        room = byId('room').value;
+        if (!room.trim()) {
+          status.textContent = 'Enter a room name.';
+          return;
+        }
+
+        byId('join').disabled = true;
+        try {
+          media = new MediaManager({
+            localVideo: byId('local-video'),
+            log,
+          });
+          const cameraStream = await media.startCamera();
+          signaling = new SignalingClient({
+            url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws?token=${encodeURIComponent(token)}`,
+            log,
+          });
+          peerManager = new PeerManager({
+            signaling,
+            localStream: cameraStream,
+            log,
+            onRemoteStream: showRemote,
+          });
+
+          media.on('screen-started', ({ stream }) => {
+            peerManager.addLocalStream(stream);
+            announceMedia('screen', true, stream.id);
+            byId('share').disabled = true;
+            byId('stop-share').disabled = false;
+          });
+          media.on('screen-stopped', ({ streamId }) => {
+            peerManager.removeLocalStream(streamId);
+            announceMedia('screen', false, streamId);
+            byId('share').disabled = false;
+            byId('stop-share').disabled = true;
+          });
+
+          signaling.on('joined', (message) => {
+            selfPeerId = message.peerId;
+            peerManager.setLocalPeerId(selfPeerId);
+            status.textContent = `Joined ${message.room} as ${selfPeerId}.`;
+            byId('leave').disabled = false;
+            byId('share').disabled = false;
+            byId('chat-text').disabled = false;
+            byId('send-chat').disabled = false;
+            announceMedia('camera', true, cameraStream.id);
+            for (const peer of message.peers) {
+              peerManager.addPeer(peer.peerId, peer.username, true);
+            }
+          });
+          signaling.on('peer-joined', (message) => {
+            log(`${message.username} (${message.peerId}) joined.`);
+            announceMedia('camera', true, cameraStream.id);
+            const screenStream = media.screenStream;
+            if (screenStream) announceMedia('screen', true, screenStream.id);
+          });
+          signaling.on('peer-left', (message) => {
+            peerManager.removePeer(message.peerId);
+            for (const [key, item] of remoteElements) {
+              if (key.startsWith(`${message.peerId}:`)) {
+                item.wrapper.remove();
+                remoteElements.delete(key);
+              }
+            }
+            log(`Peer ${message.peerId} left; its media is inactive.`);
+          });
+          signaling.on('media-state', (message) => peerManager.handleMediaState(message));
+          signaling.on('offer', (message) => {
+            peerManager.handleOffer(message).catch((error) => {
+              log(`Could not handle offer from ${message.from}: ${error.message}`);
+            });
+          });
+          signaling.on('answer', (message) => {
+            peerManager.handleAnswer(message).catch((error) => {
+              log(`Could not handle answer from ${message.from}: ${error.message}`);
+            });
+          });
+          signaling.on('ice-candidate', (message) => {
+            peerManager.handleCandidate(message).catch((error) => {
+              log(`Could not add ICE candidate from ${message.from}: ${error.message}`);
+            });
+          });
+          signaling.on('chat', (message) => {
+            const line = document.createElement('p');
+            line.textContent = `${message.username}: ${message.text}`;
+            byId('chat').append(line);
+          });
+          signaling.on('error', (message) => {
+            status.textContent = `${message.code}: ${message.message}`;
+          });
+          signaling.on('close', () => {
+            status.textContent = 'Signaling connection closed.';
+            byId('join').disabled = false;
+            byId('leave').disabled = true;
+            byId('share').disabled = true;
+            byId('stop-share').disabled = true;
+            byId('chat-text').disabled = true;
+            byId('send-chat').disabled = true;
+          });
+          await signaling.connect();
+          signaling.send({ type: 'join', room });
+        } catch (error) {
+          status.textContent = `Could not join: ${error.message}`;
+          log(`Join failed: ${error.message}`);
+          byId('join').disabled = false;
+          media?.stopAll();
+        }
+      });
+
+      byId('leave').addEventListener('click', () => {
+        signaling?.send({ type: 'leave', room });
+        signaling?.close();
+        peerManager?.closeAll();
+        media?.stopAll();
+        signaling = null;
+        peerManager = null;
+        media = null;
+        selfPeerId = '';
+        for (const item of remoteElements.values()) item.wrapper.remove();
+        remoteElements.clear();
+        byId('join').disabled = false;
+        byId('leave').disabled = true;
+        byId('share').disabled = true;
+        byId('stop-share').disabled = true;
+        byId('chat-text').disabled = true;
+        byId('send-chat').disabled = true;
+        status.textContent = 'Left the room.';
+      });
+
+      byId('share').addEventListener('click', async () => {
+        try {
+          await media.startScreenShare();
+        } catch (error) {
+          log(`Screen sharing was not started: ${error.message}`);
+        }
+      });
+      byId('stop-share').addEventListener('click', () => media?.stopScreenShare());
+
+      byId('chat-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const text = byId('chat-text').value.trim();
+        if (text) {
+          signaling?.send({ type: 'chat', text });
+          byId('chat-text').value = '';
+        }
+      });
+    </script>
+  </body>
+</html>
