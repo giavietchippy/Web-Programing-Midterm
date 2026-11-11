@@ -243,6 +243,21 @@
           signaling.on('error', (message) => {
             status.textContent = `${message.code}: ${message.message}`;
           });
+          signaling.on('room-state', (message) => {
+            log(`Room state updated; owner userId=${message.owner.userId}.`);
+          });
+          signaling.on('kicked', (message) => {
+            status.textContent = `Removed from room: ${message.reason}`;
+            peerManager?.closeAll();
+            media?.stopAll();
+            signaling?.close();
+          });
+          signaling.on('room-closed', (message) => {
+            status.textContent = `Room closed: ${message.reason}`;
+            peerManager?.closeAll();
+            media?.stopAll();
+            signaling?.close();
+          });
           signaling.on('close', () => {
             status.textContent = 'Signaling connection closed.';
             byId('join').disabled = false;
