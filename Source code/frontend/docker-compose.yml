@@ -1,0 +1,22 @@
+# Frontend only (Member 1). Run from inside frontend/. Member 3 can merge this service into the root docker-compose.yml.
+services:
+  frontend:
+    build:
+      context: .
+    image: webrtc-meeting-frontend
+    container_name: webrtc-frontend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    environment:
+      # true  = fake REST data (no backend needed for REST)
+      # false = call real REST API through Nginx -> API_UPSTREAM
+      USE_MOCK_API: "${USE_MOCK_API:-true}"
+      API_BASE: "/api"
+      WS_URL: ""
+      DEV_TOKEN_URL: "/dev/token"
+      # where Nginx forwards /api and /ws (change to service names when merged, e.g. http://platform:3000)
+      API_UPSTREAM: "${API_UPSTREAM:-http://host.docker.internal:3000}"
+      WS_UPSTREAM: "${WS_UPSTREAM:-http://host.docker.internal:3001}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
