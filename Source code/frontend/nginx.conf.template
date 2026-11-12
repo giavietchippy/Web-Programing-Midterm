@@ -38,6 +38,14 @@ server {
     proxy_send_timeout 3600s;
   }
 
+  # Real-time admin HTTP API (Member 2). "/admin" is a React route, so the browser calls /realtime/admin/*
+  location /realtime/ {
+    proxy_pass ${WS_UPSTREAM}/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
+
   # dev-only token helper (Member 2). Remove when real login works.
   location /dev/ {
     proxy_pass ${WS_UPSTREAM};

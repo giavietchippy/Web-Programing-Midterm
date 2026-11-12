@@ -6,13 +6,18 @@ import { DEFAULT_ICE_SERVERS } from '../config';
 import { useAuth } from '../context/AuthContext';
 import { useSessionState } from '../hooks/useSessionState';
 import { getForceRelay } from '../utils/prefs';
-import { RoomSession } from '../webrtc/RoomSession';
+import { RoomSession, badgesFor, deriveRoles } from '../webrtc/RoomSession';
 import ChatPanel from '../components/ChatPanel';
 import ControlsBar from '../components/ControlsBar';
 import FilesPanel from '../components/FilesPanel';
 import IcePanel from '../components/IcePanel';
 import StatsPanel from '../components/StatsPanel';
 import VideoTile from '../components/VideoTile';
+import PeoplePanel from '../components/PeoplePanel';
+import RoomSettingsPanel from '../components/RoomSettingsPanel';
+import PeerManageModal from '../components/PeerManageModal';
+import Modal from '../components/Modal';
+import { RoleBadges } from '../components/RoleBadge';
 
 const STATUS_TEXT = {
   idle: 'Starting…',
@@ -21,6 +26,14 @@ const STATUS_TEXT = {
   joining: 'Joining room…',
   connected: 'Connected',
   closed: 'Disconnected'
+};
+
+const JOIN_ERROR_TITLE = {
+  ROOM_LOCKED: 'This room is locked',
+  ROOM_FULL: 'This room is full',
+  BANNED_FROM_ROOM: 'You are banned from this room',
+  MAX_ROOMS_REACHED: 'The server cannot create more rooms',
+  ROOM_CLOSED: 'This room is closed'
 };
 
 export default function RoomPage() {
@@ -32,6 +45,9 @@ export default function RoomPage() {
   const [room, setRoom] = useState(null);
   const [tab, setTab] = useState('chat');
   const [panelOpen, setPanelOpen] = useState(true);
+  const [manage, setManage] = useState(null); // participant being managed (owner/admin only)
+  const [endOpen, setEndOpen] = useState(false);
+  const [endReason, setEndReason] = useState('');
   const state = useSessionState(session);
 
   useEffect(() => {
@@ -80,22 +96,28 @@ export default function RoomPage() {
     );
   }
 
+  const { isAdmin, canManage } = deriveRoles(state);
+  // the room tab only exists for owner/admin: fall back to chat if the rights are lost (e.g. ownership transferred)
+  const activeTab = tab === 'room' && !canManage ? 'chat' : tab;
+  const rosterOf = (peerId) => state.roster.find((r) => r.peerId === peerId);
   const hasLocalVideo = !!state.localCamera?.getVideoTracks().length;
   const peers = Object.values(state.peers);
 
   const tiles = [
-    <VideoTile key="local" stream={state.localCamera} label={`${auth.username} (You)`} muted mirror off={!state.camOn || !hasLocalVideo} />
+    <VideoTile key="local" stream={state.localCamera} label={`${auth.username} (You)`} roles={badgesFor(state, state.myPeerId)} muted mirror off={!state.camOn || !hasLocalVideo} />
   ];
   if (state.localScreen) tiles.push(<VideoTile key="local-screen" stream={state.localScreen} label="Your screen" muted screen />);
   peers.forEach((p) => {
     const screenId = p.screen?.active ? p.screen.streamId : null;
     const camStreams = Object.entries(p.streams).filter(([id]) => id !== screenId);
     const camOff = p.camera?.active === false;
+    const roles = badgesFor(state, p.peerId);
+    const onManage = canManage && rosterOf(p.peerId) ? () => setManage(rosterOf(p.peerId)) : undefined;
     if (camStreams.length === 0) {
-      tiles.push(<VideoTile key={`${p.peerId}:none`} stream={null} label={p.username} off badge={p.connectionState} />);
+      tiles.push(<VideoTile key={`${p.peerId}:none`} stream={null} label={p.username} roles={roles} onManage={onManage} off badge={p.connectionState} />);
     }
     camStreams.forEach(([id, st]) =>
-      tiles.push(<VideoTile key={`${p.peerId}:${id}`} stream={st} label={p.username} off={camOff} badge={p.connectionState} />)
+      tiles.push(<VideoTile key={`${p.peerId}:${id}`} stream={st} label={p.username} roles={roles} onManage={onManage} off={camOff} badge={p.connectionState} />)
     );
     if (screenId && p.streams[screenId]) {
       tiles.push(<VideoTile key={`${p.peerId}:${screenId}`} stream={p.streams[screenId]} label={`${p.username} — screen`} screen />);
@@ -107,7 +129,11 @@ export default function RoomPage() {
       <header className="topbar">
         <div className="brand"><span className="brand-mark"><Icon name="video" size={20} /></span>{room?.name || roomId}</div>
         <span className={`pill ${state.status}`}>{STATUS_TEXT[state.status] || state.status}</span>
-        <span className="muted">{peers.length + 1} / 4 in room</span>
+        <span className="muted">{peers.length + 1} / {state.settings?.maxPeers ?? 4} in room</span>
+        {state.settings?.locked && <span className="pill closed" title="New participants cannot join"><Icon name="lock" size={12} /> Locked</span>}
+        {state.settings?.chatEnabled === false && <span className="pill new">Chat off</span>}
+        {state.settings?.screenShare === 'owner' && <span className="pill new">Screen: owner only</span>}
+        <RoleBadges roles={badgesFor(state, state.myPeerId)} />
         <span className="grow" />
         <button className="secondary" onClick={() => navigator.clipboard?.writeText(location.href)}>Copy invite link</button>
       </header>
@@ -133,7 +159,9 @@ export default function RoomPage() {
         </main>
         {panelOpen && (
           <aside className="side">
-            {tab === 'chat' && <ChatPanel state={state} session={session} />}
+            {activeTab === 'chat' && <ChatPanel state={state} session={session} />}
+            {activeTab === 'people' && <PeoplePanel state={state} session={session} myName={auth.username} />}
+            {activeTab === 'room' && canManage && <RoomSettingsPanel state={state} session={session} onEndRoom={() => setEndOpen(true)} />}
             {tab === 'files' && <FilesPanel state={state} session={session} />}
             {tab === 'stats' && <StatsPanel state={state} />}
             {tab === 'ice' && <IcePanel state={state} />}
@@ -141,7 +169,42 @@ export default function RoomPage() {
         )}
       </div>
 
-      <ControlsBar state={state} session={session} tab={tab} panelOpen={panelOpen} setTab={setTab} setPanelOpen={setPanelOpen} onLeave={leave} />
+      <ControlsBar state={state} session={session} tab={activeTab} panelOpen={panelOpen} setTab={setTab} setPanelOpen={setPanelOpen} onLeave={leave} onEndRoom={() => setEndOpen(true)} />
+
+      {manage && <PeerManageModal state={state} session={session} target={manage} isAdmin={isAdmin} onClose={() => setManage(null)} />}
+      {endOpen && (
+        <Modal title="End room for everyone?" onClose={() => setEndOpen(false)}
+          footer={<><button className="secondary" onClick={() => setEndOpen(false)}>Cancel</button><button className="danger" onClick={() => { session?.closeRoom(endReason.trim() || undefined); setEndOpen(false); }}>End room</button></>}>
+          <p className="muted">Everyone in the call is disconnected right away and the room closes.</p>
+          <label>Message for participants (optional)<input value={endReason} onChange={(e) => setEndReason(e.target.value)} maxLength={200} placeholder="e.g. Meeting ended" autoFocus /></label>
+        </Modal>
+      )}
+
+      {state.ended && (
+        <div className="overlay">
+          <div className="card auth">
+            <h2>{state.ended.kind === 'kicked' ? (state.ended.banned ? 'You were removed and banned' : 'You were removed from the room') : 'The room was closed'}</h2>
+            <p className="muted">{state.ended.kind === 'kicked'
+              ? (state.ended.banned ? 'You cannot rejoin this room until it closes.' : 'The room owner or an administrator removed you from the call. You may rejoin unless the room is locked.')
+              : `${state.ended.by ? `${state.ended.by} ended the meeting for everyone.` : 'The meeting was ended for everyone.'}`}</p>
+            <div className="banner info"><span><b>Reason:</b> {state.ended.reason}</span></div>
+            <button onClick={() => nav('/')}>Back to lobby</button>
+          </div>
+        </div>
+      )}
+      {state.joinError && !state.ended && (
+        <div className="overlay">
+          <div className="card auth">
+            <h2>{JOIN_ERROR_TITLE[state.joinError.code] || 'Could not join the room'}</h2>
+            <div className="banner error"><span><Icon name="alert" size={16} /> {state.joinError.message}</span></div>
+            <p className="muted small">Code: <code>{state.joinError.code}</code></p>
+            <div className="row">
+              {state.joinError.code !== 'BANNED_FROM_ROOM' && <button onClick={() => session?.reconnect()}>Try again</button>}
+              <button className="secondary" onClick={() => nav('/')}>Back to lobby</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="notices">
         {state.notices.map((n) => (

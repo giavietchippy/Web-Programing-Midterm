@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, isMock } from '../api';
 import { useAuth } from '../context/AuthContext';
 import { getForceRelay, setForceRelay } from '../utils/prefs';
+import { isAdminAuth } from '../utils/roles';
 
 export default function LobbyPage() {
   const { auth, signOut } = useAuth();
@@ -15,7 +16,7 @@ export default function LobbyPage() {
   const [loading, setLoading] = useState(true);
   const [relay, setRelay] = useState(getForceRelay());
   const [stats, setStats] = useState(null);
-  const isAdmin = auth.role === 'admin';
+  const isAdmin = isAdminAuth(auth);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -48,6 +49,7 @@ export default function LobbyPage() {
       <header className="topbar">
         <div className="brand"><span className="brand-mark"><Icon name="video" size={20} /></span>WebRTC Meet</div>
         <span className="grow" />
+        {isAdmin && <button className="secondary" onClick={() => nav('/admin')}><Icon name="shield" size={16} /> Admin console</button>}
         <span className="user-chip"><i>{(auth.username || '?').charAt(0).toUpperCase()}</i>{auth.username}</span>
         <button className="secondary" onClick={signOut}>Log out</button>
       </header>

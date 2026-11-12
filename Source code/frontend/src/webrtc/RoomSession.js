@@ -10,8 +10,25 @@ const CLOSE_MESSAGES = {
   4002: 'Token expired (TOKEN_EXPIRED). Please log in again.',
   4003: 'Too many messages (RATE_LIMITED, limit 30 per second).',
   4004: 'Server rejected a message (BAD_MESSAGE).',
-  4005: 'Too many connections for this account (TOO_MANY_CONNECTIONS, max 3).'
+  4005: 'Too many connections for this account (TOO_MANY_CONNECTIONS, max 3).',
+  4000: 'An administrator disconnected you.',
+  4006: 'Your account has been denied by an administrator (USER_DENIED). Try again later or contact an admin.'
 };
+
+// websocket-contract.md "Errors": friendly texts shown to the user (the raw server message goes to the ICE debug log).
+export const ERROR_TEXT = {
+  FORBIDDEN: 'You do not have permission to do that. Only the room owner or an administrator can.',
+  ROOM_LOCKED: 'This room is locked by its owner, so new people cannot join right now.',
+  ROOM_FULL: 'This room is full. Try again when someone leaves.',
+  BANNED_FROM_ROOM: 'You were banned from this room, so you cannot rejoin until the room closes.',
+  INVALID_SETTING: 'That room setting is not valid.',
+  ROOM_CLOSED: 'This room has been closed.',
+  MAX_ROOMS_REACHED: 'The server has reached its maximum number of rooms. Try again later.',
+  NOT_IN_ROOM: 'You are not in a room yet.',
+  PEER_NOT_FOUND: 'That participant is no longer in the room.'
+};
+// Errors that mean "the join was refused" (the WebSocket stays open, but we are not in the room).
+const JOIN_REFUSED = new Set(['ROOM_LOCKED', 'ROOM_FULL', 'BANNED_FROM_ROOM', 'MAX_ROOMS_REACHED', 'ROOM_CLOSED']);
 
 export const initialState = {
   status: 'idle', // idle | media | connecting | joining | connected | closed
@@ -31,8 +48,33 @@ export const initialState = {
   stats: {},
   notices: [],
   forceRelay: false,
-  iceUrls: []
+  iceUrls: [],
+  // room-owner / admin features (websocket-contract v1.1)
+  myUserId: null,
+  myRole: 'user', // site role from joined.you.role
+  owner: null, // { peerId, userId } - userId is the stable identity of the owner
+  settings: null, // { maxPeers, locked, chatEnabled, screenShare }
+  roster: [], // [{ peerId, userId, username, role }] incl. me, from joined / room-state
+  ended: null, // { kind: 'kicked' | 'closed', reason, banned?, by? } - the call is over, show why
+  joinError: null // { code, title, message } - the server refused our join (locked / full / banned ...)
 };
+
+/** Who may manage the room: the owner (by userId) or a site admin. Hiding buttons is only convenience - the server enforces it. */
+export function deriveRoles(state) {
+  const me = state.roster.find((p) => p.peerId === state.myPeerId);
+  const isAdmin = (me?.role || state.myRole) === 'admin';
+  const isOwner = !!state.owner?.userId && state.owner.userId === state.myUserId;
+  return { isAdmin, isOwner, canManage: isAdmin || isOwner };
+}
+
+/** Role badges for one participant: 'owner' (room role) and/or 'admin' (site role). */
+export function badgesFor(state, peerId) {
+  const r = state.roster.find((p) => p.peerId === peerId);
+  const out = [];
+  if (r && state.owner?.userId && r.userId === state.owner.userId) out.push('owner');
+  if (r?.role === 'admin') out.push('admin');
+  return out;
+}
 
 export function describeMediaError(e) {
   if (!e) return 'Could not access camera/microphone.';
@@ -91,10 +133,10 @@ export class RoomSession {
     this.set((s) => ({ iceLog: [...s.iceLog.slice(-299), { id: ++this.seq, t, peer: peerId, cat, msg }] }));
   }
 
-  notify(kind, text) {
+  notify(kind, text, ttl = 7000) {
     const id = ++this.seq;
     this.set((s) => ({ notices: [...s.notices, { id, kind, text }].slice(-4) }));
-    setTimeout(() => this.dismiss(id), 7000);
+    setTimeout(() => this.dismiss(id), ttl);
   }
   dismiss(id) { this.set((s) => ({ notices: s.notices.filter((n) => n.id !== id) })); }
 
@@ -178,6 +220,7 @@ export class RoomSession {
     if (!t) return this.notify('warn', 'No microphone available.');
     t.enabled = !t.enabled;
     this.set({ micOn: t.enabled });
+    this.announceMedia('microphone'); // lets admins see the mic state in the room detail page
   }
 
   async toggleScreen() {
@@ -212,15 +255,18 @@ export class RoomSession {
     if (kind === 'camera') {
       const t = this.localCamera?.getVideoTracks()[0];
       this.send({ type: 'media-state', kind: 'camera', active: !!t && t.enabled, streamId: this.localCamera?.id || null });
+    } else if (kind === 'microphone') {
+      const t = this.localCamera?.getAudioTracks()[0];
+      if (t) this.send({ type: 'media-state', kind: 'microphone', active: t.enabled, streamId: this.localCamera.id });
     } else if (this.localScreen) {
       this.send({ type: 'media-state', kind: 'screen', active: true, streamId: this.localScreen.id });
     }
   }
-  announceAll() { this.announceMedia('camera'); this.announceMedia('screen'); }
+  announceAll() { this.announceMedia('camera'); this.announceMedia('microphone'); this.announceMedia('screen'); }
 
   // ----- signaling socket -----
   connect() {
-    this.set({ status: 'connecting', error: null, closeCode: null });
+    this.set({ status: 'connecting', error: null, closeCode: null, joinError: null });
     let ws;
     try {
       ws = new WebSocket(buildWsUrl(this.opts.token));
@@ -289,16 +335,21 @@ export class RoomSession {
       case 'chat':
         return this.pushMessage({ id: ++this.seq, transport: 'ws', from: msg.from, username: msg.username, text: msg.text, ts: msg.ts, mine: msg.from === this.state.myPeerId });
       case 'media-state': return this.onMediaState(msg);
-      case 'error':
-        this.log('-', 'server-error', `${msg.code}: ${msg.message}`);
-        return this.notify('error', `[${msg.code}] ${msg.message}`);
+      case 'room-state': return this.applyRoomState(msg);
+      case 'kicked': return this.onKicked(msg);
+      case 'force-mute': return this.onForceMute(msg);
+      case 'room-closed': return this.onRoomClosed(msg);
+      case 'announcement': return this.onAnnouncement(msg);
+      case 'error': return this.onServerError(msg);
       default:
         this.log('-', 'ws', `unknown message type: ${msg.type}`);
     }
   }
 
   onJoined(msg) {
-    this.set({ myPeerId: msg.peerId, status: 'connected', error: null });
+    const you = msg.you || { peerId: msg.peerId };
+    this.set({ myPeerId: msg.peerId, myUserId: you.userId || null, myRole: you.role || 'user', status: 'connected', error: null, joinError: null });
+    this.applyRoomState({ owner: msg.owner, settings: msg.settings, peers: [you, ...(msg.peers || [])] });
     this.log('-', 'room', `joined "${msg.room}" as ${msg.peerId}; ${msg.peers.length} peer(s) already here`);
     this.announceAll();
     for (const p of msg.peers) {
@@ -306,6 +357,94 @@ export class RoomSession {
       this.ensureLink(p.peerId, true); // the new joiner offers to every existing peer
     }
   }
+
+  // ----- room owner / admin features -----
+  applyRoomState(msg) {
+    const roster = Array.isArray(msg.peers) ? msg.peers : this.state.roster;
+    const names = {};
+    roster.forEach((p) => { names[p.peerId] = p.username; });
+    this.set((s) => ({
+      owner: msg.owner !== undefined ? msg.owner : s.owner,
+      settings: msg.settings ? { ...msg.settings } : s.settings,
+      roster,
+      myRole: roster.find((p) => p.peerId === s.myPeerId)?.role || s.myRole
+    }));
+    Object.entries(names).forEach(([id, name]) => { if (this.state.peers[id]) this.ensurePeer(id, name); });
+  }
+
+  userName(userId) { return this.state.roster.find((p) => p.userId === userId)?.username || 'An admin'; }
+
+  onKicked(msg) {
+    const reason = msg.reason || 'No reason given.';
+    this.log('-', 'room', `kicked${msg.banned ? ' and banned' : ''}: ${reason}`);
+    this.terminate({ kind: 'kicked', reason, banned: !!msg.banned });
+  }
+
+  onRoomClosed(msg) {
+    const reason = msg.reason || 'The room was closed.';
+    this.log('-', 'room', `room closed: ${reason}`);
+    this.terminate({ kind: 'closed', reason, by: msg.by ? this.userName(msg.by) : null });
+  }
+
+  // force-mute is only a REQUEST (the server cannot touch our devices): we comply by turning our own local track off.
+  onForceMute(msg) {
+    const who = this.userName(msg.by);
+    if (msg.kind === 'audio') {
+      const t = this.localCamera?.getAudioTracks()[0];
+      if (t) { t.enabled = false; this.set({ micOn: false }); this.announceMedia('microphone'); }
+      this.notify('warn', `${who} muted your microphone. Press Unmute to speak again.`, 9000);
+    } else if (msg.kind === 'video') {
+      const t = this.localCamera?.getVideoTracks()[0];
+      if (t) { t.enabled = false; this.set({ camOn: false }); this.announceMedia('camera'); }
+      this.notify('warn', `${who} turned your camera off.`, 9000);
+    } else if (msg.kind === 'screen') {
+      this.stopScreen();
+      this.notify('warn', `${who} stopped your screen sharing.`, 9000);
+    }
+  }
+
+  onAnnouncement(msg) {
+    this.log('-', 'room', `announcement: ${msg.text}`);
+    this.notify('announce', `Announcement from ${this.userName(msg.from)}: ${msg.text}`, 15000);
+  }
+
+  onServerError(msg) {
+    this.log('-', 'server-error', `${msg.code}: ${msg.message}`);
+    const friendly = ERROR_TEXT[msg.code];
+    if (JOIN_REFUSED.has(msg.code) && this.state.status === 'joining') return this.joinFail(msg.code, friendly || msg.message);
+    if (msg.code === 'INVALID_SETTING') return this.notify('error', `${friendly} ${msg.message}`);
+    // FORBIDDEN carries a specific server text ("Chat is disabled by the room owner."), so show that one.
+    if (msg.code === 'FORBIDDEN') return this.notify('error', `Not allowed: ${msg.message || friendly}`);
+    this.notify('error', friendly || `[${msg.code}] ${msg.message}`);
+  }
+
+  /** The server refused our join: stay on the page, keep the camera, explain why and offer "Try again". */
+  joinFail(code, message) {
+    if (this.ws) { this.ws.onclose = null; try { this.ws.close(1000); } catch { /* noop */ } this.ws = null; }
+    this.teardownLinks();
+    this.outq = [];
+    this.set({ status: 'closed', error: null, peers: {}, stats: {}, myPeerId: null, roster: [], joinError: { code, message } });
+  }
+
+  /** Leave the call for good (kicked / room closed) but keep the state so the page can explain what happened. */
+  terminate(ended) {
+    if (this.closed) return;
+    this.closed = true;
+    clearInterval(this.statsTimer);
+    if (this.ws) { this.ws.onclose = null; try { this.ws.close(1000); } catch { /* noop */ } }
+    this.teardownLinks();
+    this.localCamera?.getTracks().forEach((t) => t.stop());
+    this.localScreen?.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+    this.set({ status: 'closed', ended, error: null, peers: {}, stats: {}, myPeerId: null, roster: [], localCamera: null, localScreen: null, camOn: false, micOn: false });
+  }
+
+  // Commands (the server re-checks permissions on every one of them)
+  updateSettings(settings) { this.send({ type: 'update-settings', settings }); }
+  kick(peerId, { ban = false, reason } = {}) { this.send({ type: 'kick', peerId, ban, ...(reason ? { reason } : {}) }); }
+  mutePeer(peerId, kind) { this.send({ type: 'mute-peer', peerId, kind }); }
+  muteAll(kind = 'audio') { this.send({ type: 'mute-all', kind }); }
+  transferOwner(peerId) { this.send({ type: 'transfer-owner', peerId }); }
+  closeRoom(reason) { this.send({ type: 'close-room', ...(reason ? { reason } : {}) }); }
 
   onPeerLeft(peerId) {
     const l = this.links.get(peerId);
@@ -315,7 +454,7 @@ export class RoomSession {
     this.set((s) => {
       const { [peerId]: _p, ...peers } = s.peers;
       const { [peerId]: _s, ...stats } = s.stats;
-      return { peers, stats };
+      return { peers, stats, roster: s.roster.filter((r) => r.peerId !== peerId) };
     });
   }
 
@@ -333,7 +472,7 @@ export class RoomSession {
 
   onMediaState(msg) {
     const { from, kind, active, streamId } = msg;
-    if (!from || (kind !== 'camera' && kind !== 'screen')) return;
+    if (!from || !['camera', 'screen', 'microphone'].includes(kind)) return;
     this.ensurePeer(from);
     this.updatePeer(from, (p) => {
       const next = { ...p, [kind]: { active: !!active, streamId } };

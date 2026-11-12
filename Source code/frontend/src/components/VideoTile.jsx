@@ -1,9 +1,10 @@
 import Icon from './Icon';
+import { RoleBadges } from './RoleBadge';
 import { useEffect, useRef, useState } from 'react';
 
 // srcObject is attached in an effect (never during render) and the <video> element is
 // ALWAYS mounted with an explicit 16:9 box, so a late/missing stream can never collapse the layout.
-export default function VideoTile({ stream, label, muted = false, mirror = false, screen = false, off = false, badge }) {
+export default function VideoTile({ stream, label, muted = false, mirror = false, screen = false, off = false, badge, roles = [], onManage }) {
   const ref = useRef(null);
   const [blocked, setBlocked] = useState(false);
 
@@ -25,7 +26,8 @@ export default function VideoTile({ stream, label, muted = false, mirror = false
       <video ref={ref} autoPlay playsInline muted={muted} className={mirror ? 'mirror' : ''} style={{ visibility: off ? 'hidden' : 'visible' }} />
       {off && <div className="avatar"><span style={avatarStyle}>{initial}</span></div>}
       {blocked && <button className="play-btn" onClick={() => ref.current?.play().then(() => setBlocked(false))}><Icon name="play" size={14} /> Click to play</button>}
-      <div className="tile-label">{label}{badge && <em>{badge}</em>}</div>
+      {onManage && <button className="tile-menu" onClick={onManage} title={`Manage ${label}`} aria-label={`Manage ${label}`}><Icon name="more" size={18} /></button>}
+      <div className="tile-label">{label}<RoleBadges roles={roles} />{badge && <em>{badge}</em>}</div>
     </div>
   );
 }

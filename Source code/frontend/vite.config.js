@@ -15,6 +15,8 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/api': { target: api, changeOrigin: true },
         '/ws': { target: rt, ws: true, changeOrigin: true },
+        // Real-time admin HTTP API. "/admin" itself is a React route, so the browser uses "/realtime/admin/*".
+        '/realtime': { target: rt, changeOrigin: true, rewrite: (p) => p.replace(/^\/realtime/, '') },
         '/dev': { target: rt, changeOrigin: true } // dev-only POST /dev/token
       }
     }
