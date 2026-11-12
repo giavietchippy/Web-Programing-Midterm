@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "make:test-token": "node scripts/make-test-token.js"
+    "make:test-token": "node scripts/make-test-token.js",
+    "test:admin-smoke": "node scripts/admin-smoke-test.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

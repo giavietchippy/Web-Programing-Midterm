@@ -5,11 +5,18 @@ require('dotenv').config();
 const crypto = require('node:crypto');
 const jwt = require('jsonwebtoken');
 
-const username = process.argv[2];
+const args = process.argv.slice(2);
+const username = args.find((argument) => !argument.startsWith('--'));
+const roleIndex = args.indexOf('--role');
+const role = roleIndex === -1 ? 'user' : args[roleIndex + 1];
 const secret = process.env.JWT_SECRET;
 
 if (!username || !username.trim()) {
-  console.error('Usage: npm run make:test-token -- <username>');
+  console.error('Usage: npm run make:test-token -- <username> [--role user|admin]');
+  process.exit(1);
+}
+if (role !== 'user' && role !== 'admin') {
+  console.error('Role must be "user" or "admin".');
   process.exit(1);
 }
 if (!secret) {
@@ -17,7 +24,7 @@ if (!secret) {
   process.exit(1);
 }
 
-const token = jwt.sign({ userId: crypto.randomUUID(), username: username.trim() }, secret, {
+const token = jwt.sign({ userId: crypto.randomUUID(), username: username.trim(), role }, secret, {
   algorithm: 'HS256',
   expiresIn: '1h',
 });
