@@ -23,7 +23,7 @@ const SEED_ROOMS = [
 ];
 
 // Old mock data (before contract v1.0) had no id/role/createdBy: upgrade it in place.
-function users() {
+export function users() {
   const list = read('mock_users', null);
   if (!list) return SEED_USERS;
   return list.map((u) => ({ id: u.id || `mock-${u.username}`, role: u.role || (u.username === 'admin' ? 'admin' : 'user'), createdAt: u.createdAt || '2026-01-01T00:00:00.000Z', ...u }));
@@ -33,6 +33,7 @@ function rooms() {
   if (!list) return SEED_ROOMS;
   return list.map((r) => ({ maxPeers: 4, createdBy: { id: 'mock-admin', username: 'admin' }, createdAt: '2026-01-01T00:00:00.000Z', ...r }));
 }
+export const saveUsers = (list) => write('mock_users', list);
 const history = () => read('mock_messages', {});
 
 // The mock "server" reads the caller from the stored session, like the real one reads the JWT.
@@ -44,12 +45,12 @@ function currentUser() {
 }
 const stripUser = (u) => ({ id: u.id, username: u.username, role: u.role });
 
-async function devToken(username) {
+async function devToken(username, role) {
   try {
     const r = await fetch(config.DEV_TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username })
+      body: JSON.stringify({ username, role })
     });
     if (r.ok) { const d = await r.json(); if (d.token) return d.token; }
   } catch { /* real-time server not running */ }
@@ -60,7 +61,8 @@ export async function login(username, password) {
   await wait();
   const u = users().find((x) => x.username.toLowerCase() === String(username).toLowerCase() && x.password === password);
   if (!u) fail(401, 'INVALID_CREDENTIALS', 'Wrong username or password. (mock accounts: demo / demo123, admin / admin123)');
-  const token = await devToken(u.username);
+  if (u.disabled) fail(403, 'ACCOUNT_DISABLED', 'This account has been disabled by an administrator.');
+  const token = await devToken(u.username, u.role); // real signed JWT incl. the role claim (token-contract v1.1)
   const p = parseJwt(token);
   return { token, userId: p?.userId || u.id, username: p?.username || u.username, role: u.role };
 }

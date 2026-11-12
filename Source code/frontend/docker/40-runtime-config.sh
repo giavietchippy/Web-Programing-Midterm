@@ -5,9 +5,11 @@ set -e
 cat > /usr/share/nginx/html/config.js <<CFG_END
 window.__APP_CONFIG__ = {
   USE_MOCK_API: ${USE_MOCK_API:-true},
+  USE_MOCK_ADMIN: ${USE_MOCK_ADMIN:-${USE_MOCK_API:-true}},
+  RT_ADMIN_BASE: "${RT_ADMIN_BASE:-/realtime/admin}",
   API_BASE: "${API_BASE:-/api}",
   WS_URL: "${WS_URL:-}",
   DEV_TOKEN_URL: "${DEV_TOKEN_URL:-/dev/token}"
 };
 CFG_END
-echo "[runtime-config] USE_MOCK_API=${USE_MOCK_API:-true} API_BASE=${API_BASE:-/api}"
+echo "[runtime-config] USE_MOCK_API=${USE_MOCK_API:-true} USE_MOCK_ADMIN=${USE_MOCK_ADMIN:-${USE_MOCK_API:-true}} API_BASE=${API_BASE:-/api}"

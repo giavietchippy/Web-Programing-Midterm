@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { timeOf } from '../utils/format';
+import { deriveRoles } from '../webrtc/RoomSession';
 
 export default function ChatPanel({ state, session }) {
   const [text, setText] = useState('');
   const [transport, setTransport] = useState('ws');
   const endRef = useRef(null);
+  const chatOff = state.settings?.chatEnabled === false && !deriveRoles(state).canManage; // server answers FORBIDDEN anyway
 
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [state.messages.length]);
 
@@ -31,13 +33,14 @@ export default function ChatPanel({ state, session }) {
         ))}
         <div ref={endRef} />
       </div>
+      {chatOff && <div className="banner warn chat-off">Chat is turned off by the room owner.</div>}
       <form className="chat-form" onSubmit={submit}>
-        <select value={transport} onChange={(e) => setTransport(e.target.value)} title="How to send this message">
+        <select value={transport} disabled={chatOff} onChange={(e) => setTransport(e.target.value)} title="How to send this message">
           <option value="ws">via Server (WebSocket)</option>
           <option value="p2p">via P2P (DataChannel)</option>
         </select>
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" maxLength={2000} />
-        <button type="submit" disabled={state.status !== 'connected'}>Send</button>
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder={chatOff ? 'Chat is disabled' : 'Type a message…'} maxLength={2000} disabled={chatOff} />
+        <button type="submit" disabled={state.status !== 'connected' || chatOff}>Send</button>
       </form>
     </div>
   );

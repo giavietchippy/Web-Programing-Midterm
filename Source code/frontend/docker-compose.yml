@@ -11,6 +11,9 @@ services:
       # true  = fake REST data (no backend needed for REST)
       # false = call real REST API through Nginx -> API_UPSTREAM
       USE_MOCK_API: "${USE_MOCK_API:-true}"
+      # fake /admin/* + /api/admin/users data for the Administrator pages (defaults to USE_MOCK_API)
+      USE_MOCK_ADMIN: "${USE_MOCK_ADMIN:-${USE_MOCK_API:-true}}"
+      RT_ADMIN_BASE: "/realtime/admin"
       API_BASE: "/api"
       WS_URL: ""
       DEV_TOKEN_URL: "/dev/token"

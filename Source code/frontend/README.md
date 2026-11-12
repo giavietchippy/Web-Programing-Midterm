@@ -29,17 +29,21 @@ frontend/                   # nằm trong Y3_Webapp_Mid/frontend
 ├─ .env.example             # mẫu biến môi trường (dev + docker)
 ├─ docker-compose.yml       # service "frontend" (Member 3 có thể gộp vào compose gốc)
 ├─ Dockerfile               # build Vite -> Nginx
-├─ nginx.conf.template      # SPA fallback + proxy /api, /ws, /dev
+├─ nginx.conf.template      # SPA fallback + proxy /api, /ws, /realtime, /dev
 ├─ docker/40-runtime-config.sh   # sinh /config.js từ biến môi trường khi container chạy
 ├─ public/config.js         # cấu hình runtime (mock/real, WS_URL...)
-├─ vite.config.js           # dev proxy /api, /ws, /dev
+├─ vite.config.js           # dev proxy /api, /ws, /realtime, /dev
 └─ src/
    ├─ api/                  # endpoints.js (REST contract v1.0), errors.js, real.js, mock.js
+   │   └─ admin/            # TOÀN BỘ lời gọi của khu vực /admin: real.js, mock.js, index.js, http.js
+   ├─ admin/                # feed.jsx (live feed /ws/admin dùng chung), ui.jsx (hook + helper cho các trang admin)
    ├─ webrtc/
    │   ├─ RoomSession.js    # signaling WS + media + quản lý peers (không phụ thuộc React)
    │   └─ PeerLink.js       # 1 RTCPeerConnection: perfect negotiation, DataChannel, getStats
    ├─ pages/                # AuthPage (login/register), LobbyPage, RoomPage
-   └─ components/           # VideoTile, ControlsBar, ChatPanel, FilesPanel, StatsPanel, IcePanel, ErrorBoundary
+   │   └─ admin/            # AdminLayout, Dashboard, Rooms, RoomDetail, Users, Connections, Config, Audit, Announcements
+   └─ components/           # VideoTile, ControlsBar, ChatPanel, FilesPanel, StatsPanel, IcePanel, ErrorBoundary,
+                            # PeoplePanel, RoomSettingsPanel, PeerManageModal, RoleBadge, Modal, admin/RoomModals
 ```
 
 ## 2. Cách chạy
@@ -48,7 +52,7 @@ frontend/                   # nằm trong Y3_Webapp_Mid/frontend
 ```bash
 cd frontend && npm install && npm run dev
 ```
-Vite proxy: `/api` → `http://localhost:3000` (Member 3), `/ws` và `/dev` → `http://localhost:3001` (Member 2).
+Vite proxy: `/api` → `http://localhost:3000` (Member 3); `/ws` (kể cả `/ws/admin`), `/dev` và `/realtime/*` → `http://localhost:3001` (Member 2; tiền tố `/realtime` được bỏ đi, xem mục 11).
 Khác cổng: copy `frontend/.env.example` thành `frontend/.env` và sửa `DEV_API_TARGET`, `DEV_WS_TARGET`. (Chỉ có MỘT file mẫu: `frontend/.env.example`. `.env.example`, `docker-compose.yml`, `README.md` ở thư mục gốc là của cả nhóm/Member 3 – frontend không đụng tới.)
 
 ### Docker (chạy trong thư mục `frontend/`)
@@ -84,8 +88,8 @@ Contract: `rest-api-contract.md` v1.0 (Member 3). `src/api/endpoints.js` liệt 
 | `peer-joined` → gửi lại media-state | `onMessage('peer-joined')` → `announceAll()` |
 | `peer-left` → xoá mọi media state của peer | `onPeerLeft` |
 | Rate limit 30 msg/s | hàng đợi gửi ~25 msg/s (`RoomSession.pump`) |
-| Close code 4001/4002/4003/4004/4005 | `CLOSE_MESSAGES` – hiện banner + nút "Log in again/Reconnect" |
-| Giới hạn 4 người/phòng | hiển thị `x / 4`; lỗi `ROOM_FULL` hiện toast |
+| Close code 4000/4001/4002/4003/4004/4005/4006 | `CLOSE_MESSAGES` – hiện banner + nút "Log in again/Reconnect" |
+| Giới hạn người/phòng | hiển thị `x / maxPeers` theo `settings`; `ROOM_FULL` hiện thẻ giải thích + nút "Try again" |
 
 **Chat có 2 đường** (chọn trong ô chat): *via Server (WebSocket)* theo contract (`chat` broadcast) và *via P2P (DataChannel)*. File chỉ đi qua DataChannel.
 
@@ -117,7 +121,7 @@ Gợi ý cho **báo cáo** (đề yêu cầu tiếng Anh, 20–60 trang, nhiều
 ## 7. Lưu ý cho Member 2 (Real-time)
 - Frontend gửi `join` ngay khi WS mở; `leave` khi rời trang.
 - Cần endpoint dev `POST /dev/token` (đã có trong token-contract) và `JWT_SECRET` ở local để mock login hoạt động.
-- `media-state` gửi các trường `kind` (`camera`/`screen`), `active`, `streamId`.
+- `media-state` gửi các trường `kind` (`camera`/`microphone`/`screen`), `active`, `streamId`.
 - Nếu từ chối ở bước HTTP upgrade (401), trình duyệt không đọc được mã lỗi → UI chỉ hiện "Cannot reach the signaling server…". Nếu muốn UI báo đúng 4001/4002 hãy **accept rồi gửi `error` + close** như contract mô tả.
 
 ## 8. Lưu ý cho Member 3 (Platform)
@@ -131,4 +135,79 @@ Gợi ý cho **báo cáo** (đề yêu cầu tiếng Anh, 20–60 trang, nhiều
 Code này được viết trong môi trường **không có mạng** nên chưa chạy `npm install`/`build` và chưa thử trên trình duyệt thật. Hãy chạy thử 2 tab; nếu có lỗi, gửi log Console/ảnh chụp để sửa. Checklist nên test: login → vào demo-room → cho phép camera → 2 tab thấy nhau → chat WS & P2P → gửi file → share screen → Force TURN (cần coturn của Member 2) → rời phòng.
 
 ## 10. Chưa làm (chờ contract / ngoài phạm vi)
-- Trang admin stats (`/admin` endpoint của Member 3), tự động reconnect WebSocket (hiện có nút Reconnect thủ công).
+- Tự động reconnect WebSocket trong phòng (hiện có nút Reconnect thủ công; live feed của admin thì có tự reconnect).
+- Tính năng P3 (phòng chờ, mật khẩu phòng) – server cũng chưa làm.
+
+---
+
+## 11. Chức năng chủ phòng và khu vực Administrator (`/admin`)
+
+### 11.1 Trong phòng họp (trang `/room/:id`)
+Phần quản lý chỉ **hiện** cho chủ phòng (owner) và admin; việc ẩn nút chỉ để tiện, **server mới là nơi kiểm tra quyền** mọi lệnh.
+
+| Thành phần | Mô tả | Lệnh WebSocket |
+|---|---|---|
+| Huy hiệu `owner` / `admin` | Cạnh tên trên ô video, topbar, tab People. Owner xác định bằng `owner.userId`, admin bằng `role` của peer | – |
+| Tab **People** | Danh sách người + menu "⋯": mute audio, stop camera, stop screen share, kick, kick & ban, make owner | `mute-peer`, `kick`, `transfer-owner` |
+| Tab **Room** | Giới hạn người, khóa phòng, bật/tắt chat, chia sẻ màn hình (everyone / owner only) | `update-settings` (chỉ gửi trường đã đổi) |
+| Nút **Mute all**, **End room** | Trên thanh điều khiển (và trong tab Room) | `mute-all`, `close-room` |
+
+Sự kiện server được xử lý trong `webrtc/RoomSession.js`: `room-state` (cập nhật UI), `kicked` (rời cuộc gọi và hiện lý do), `force-mute` (tự tắt track local và báo ai yêu cầu; server không ép được trình duyệt), `room-closed`, `announcement` (toast). Mã lỗi hiển thị thông báo rõ ràng: `FORBIDDEN`, `ROOM_LOCKED`, `ROOM_FULL`, `BANNED_FROM_ROOM`, `INVALID_SETTING` (các lỗi từ chối vào phòng hiện thẻ riêng với nút "Try again").
+
+### 11.2 Khu vực `/admin`
+Chỉ hiện khi role là `admin` (ưu tiên claim `role` trong JWT, nếu không có thì dùng `user.role` của phản hồi login); người khác bị chuyển về trang chủ. Lobby có nút "Admin console" cho admin.
+
+| Mục | Chức năng | Nguồn dữ liệu |
+|---|---|---|
+| Dashboard | Kết nối live, phòng, peers, messages/giây, peak, lỗi theo mã, biểu đồ live | Member 2: `GET /admin/stats` + feed `/ws/admin`; Member 3: `GET /api/admin/stats` |
+| Rooms | Danh sách live, tìm kiếm, sắp xếp; đóng phòng, đổi cài đặt, thông báo | Member 2: `/admin/rooms`, `/admin/rooms/:id/settings`, `/admin/rooms/:id/close`, `/admin/announce` |
+| Room detail | Người trong phòng, vai trò, trạng thái media; kick, ban, mute, chuyển owner, vào phòng | Member 2: `/admin/rooms/:id` (+ `kick`, `mute`, `transfer-owner`) |
+| Users | Danh sách, tìm kiếm, tạo, đổi role, khóa/mở khóa, reset mật khẩu, xóa | Member 3: `/api/admin/users` |
+| Connections | Mọi socket đang mở; ngắt kết nối, cấm N phút | Member 2: `/admin/connections`, `/admin/users/:userId/{disconnect,deny}` |
+| Limits & config | maxPeersPerRoom, maxRooms, kết nối/người, rate limit, mặc định phòng mới | Member 2: `GET/PUT /admin/config` |
+| Audit log | Bảng lọc theo action/phòng/user, dòng mới hiện live | Member 2: `GET /admin/audit` + feed |
+| Announcements | Gửi thông báo cho mọi phòng hoặc một phòng | Member 2: `POST /admin/announce` |
+
+**Nút Block (Users)** gọi **2 API từ một nút**: (1) Member 3 `PATCH /api/admin/users/:id {disabled:true}`, (2) Member 2 `POST /admin/users/:userId/deny {minutes}` để ngắt kết nối ngay. Unblock làm ngược lại (`PATCH {disabled:false}` rồi `DELETE /admin/users/:userId/deny`).
+
+### 11.3 Mock vs thật cho khu vực admin
+Mọi lời gọi admin nằm trong `src/api/admin/` (`real.js`, `mock.js`, `index.js` chọn bản dùng). Biến `USE_MOCK_ADMIN` (mặc định theo `USE_MOCK_API`):
+- `true`: dữ liệu giả trong bộ nhớ, có live feed giả lập; user dùng chung tài khoản `localStorage` với mock login nên user tạo ở trang Users đăng nhập được. Đăng nhập `admin / admin123` để thử, không cần backend.
+- `false`: gọi server thật. Đổi trong `public/config.js` (dev) hoặc biến môi trường `USE_MOCK_ADMIN` (Docker, không cần build lại).
+
+**Đường dẫn:** `/admin` là route React nên trình duyệt gọi HTTP admin của Member 2 qua **`/realtime/admin/*`**; Vite proxy hoặc Nginx bỏ tiền tố `/realtime` rồi chuyển tới server realtime (thành `/admin/*`). Có thể đổi bằng `RT_ADMIN_BASE`. Live feed dùng `ws://host/ws/admin?token=<JWT>` (đã nằm trong proxy `/ws`).
+
+### 11.4 Checklist tích hợp cho Member 2 (Real-time)
+- [ ] `/realtime/*` được chuyển tới server realtime và bỏ tiền tố (dev: đã có trong `vite.config.js`; deploy: khối `location /realtime/` trong `nginx.conf.template`).
+- [ ] `/ws/admin` đi qua cùng proxy WebSocket với `/ws` (đã nằm trong khối `location /ws`).
+- [ ] Token admin có claim `role: "admin"` (dev: `POST /dev/token` với `{ "username": "...", "role": "admin" }`; mock login của frontend đã gửi sẵn `role`).
+- [ ] CORS không cần thiết vì frontend cùng origin qua proxy.
+- [ ] Hành động quản lý tính theo `userId` (disconnect/deny); `:userId` phải bằng `user.id` của platform.
+
+### 11.5 Checklist tích hợp cho Member 3 (Platform)
+
+**(a) Thêm claim `role` vào JWT.** Hai tài liệu đang mâu thuẫn: `rest-api-contract.md` v1.0 nói token **không có** role, còn `token-contract.md` v1.1 và server realtime **đọc role từ claim `role`** của JWT cho `/admin/*` và `/ws/admin`. Nếu token không có claim này, admin vẫn vào được trang `/admin` (frontend dựa vào `user.role`) nhưng dữ liệu realtime báo 403 và trong phòng họp admin không có quyền admin. Cần sửa `POST /api/login` để payload là `{ userId, username, role, iat, exp }` (`role` = `user` | `admin`, lấy từ database, vẫn HS256 + `JWT_SECRET`), rồi cập nhật contract (cần cả 3 thành viên duyệt).
+
+**(b) Làm API `/api/admin/users`** (chưa có trong contract v1.0). Frontend đang **giả định** hình dạng sau (`src/api/admin/real.js`); nếu làm khác hãy báo để sửa cho khớp hoặc cập nhật contract. Tất cả cần `Authorization: Bearer <JWT>`, chỉ role `admin` (đọc từ database); lỗi dạng `{ "error": "CODE", "message": "..." }`.
+
+| Method | Path | Body | Thành công |
+|---|---|---|---|
+| `GET` | `/api/admin/users?search=&role=` | – | `200 { "users": [user] }` |
+| `POST` | `/api/admin/users` | `{ username, password, role }` | `201 { "user": user }` |
+| `PATCH` | `/api/admin/users/:id` | `{ role?, disabled? }` | `200 { "user": user }` |
+| `POST` | `/api/admin/users/:id/password` | `{ password }` | `200` hoặc `204` |
+| `DELETE` | `/api/admin/users/:id` | – | `204` |
+
+`user = { id, username, role, disabled, createdAt }` (không bao giờ trả mật khẩu/hash). Ghi chú:
+- `GET`: `search` lọc theo username hoặc id (không phân biệt hoa thường), `role` là `user`/`admin`, không phân trang.
+- `POST`: dùng lại luật validate của `/api/register`; lỗi `400 VALIDATION_ERROR`, `409 USERNAME_TAKEN`.
+- `PATCH`: `disabled: true` nghĩa là **không đăng nhập được nữa**. Frontend mock dùng `403 ACCOUNT_DISABLED` cho `POST /api/login` của tài khoản bị khóa; mã lỗi này cần nhóm chốt.
+- `POST .../password`: admin tự đặt mật khẩu mới (8–72 byte).
+- `DELETE`: nên chặn admin tự xóa chính mình (`403 FORBIDDEN`); frontend cũng đã ẩn nút này.
+- Token cũ của user bị khóa còn hạn tới 1 giờ: nên kiểm tra `disabled` ở mỗi request REST; phía realtime đã có lệnh deny (bước 2 của nút Block).
+
+### 11.6 Cách kiểm tra khi đã tích hợp
+1. Đặt `USE_MOCK_API=false` và `USE_MOCK_ADMIN=false` (`.env.example`, `public/config.js`).
+2. Đăng nhập bằng tài khoản admin và mở `/admin`.
+3. **Users** tải được danh sách (ý 11.5b); **Dashboard / Rooms / Connections** hiện số liệu thật chứ không báo 403 (ý 11.5a).
+4. Mở hai tab (một admin, một user) vào cùng phòng và thử: kick, ban, mute, khóa phòng, End room, Block user, announcement.
