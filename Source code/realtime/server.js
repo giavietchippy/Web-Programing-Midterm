@@ -208,6 +208,12 @@ function createSignalingServer({
     });
   });
   const wss = new WebSocket.Server({ noServer: true, maxPayload: MAX_TRANSPORT_PAYLOAD });
+  const rejectedWss = new WebSocket.Server({
+    noServer: true,
+    clientTracking: false,
+    maxPayload: MAX_TRANSPORT_PAYLOAD,
+  });
+  const rejectedSockets = new Set();
 
   function recordAudit(
     actor,
@@ -414,6 +420,19 @@ function createSignalingServer({
       return;
     }
     send(ws, { type: 'error', code, message });
+  }
+
+  function closeRejectedWebSocket(request, socket, head, code, message, closeCode, identity) {
+    rejectedWss.handleUpgrade(request, socket, head, (ws) => {
+      if (identity) {
+        ws.userId = identity.userId;
+        ws.username = identity.username;
+        ws.role = identity.role;
+      }
+      rejectedSockets.add(ws);
+      ws.once('close', () => rejectedSockets.delete(ws));
+      sendError(ws, code, message, closeCode);
+    });
   }
 
   function broadcastRoom(room, message, except) {
@@ -1611,26 +1630,42 @@ function createSignalingServer({
     }
     const identity = verifyToken(requestUrl.searchParams.get('token'), secret);
     if (identity.error) {
-      rejectUpgrade(socket, 401, identity.error, identity.message);
-      return;
-    }
-    if (isAdminFeed && identity.role !== 'admin') {
-      errorsByCode.set('FORBIDDEN', (errorsByCode.get('FORBIDDEN') || 0) + 1);
-      recordAudit(identity, 'forbidden:admin-feed', null, null, {}, 'denied');
-      rejectUpgrade(socket, 403, 'FORBIDDEN', 'Admin role required.');
+      closeRejectedWebSocket(
+        request,
+        socket,
+        head,
+        identity.error,
+        identity.message,
+        CLOSE_CODES[identity.error],
+      );
       return;
     }
     const denial = deniedUsers.get(identity.userId);
     if (denial && denial.expiresAt > Date.now()) {
-      rejectUpgrade(
+      closeRejectedWebSocket(
+        request,
         socket,
-        403,
+        head,
         'USER_DENIED',
         'Your account has been denied by an administrator.',
+        CLOSE_CODES.USER_DENIED,
+        identity,
       );
       return;
     }
     if (denial) deniedUsers.delete(identity.userId);
+    if (isAdminFeed && identity.role !== 'admin') {
+      closeRejectedWebSocket(
+        request,
+        socket,
+        head,
+        'FORBIDDEN',
+        'Admin role required.',
+        1008,
+        identity,
+      );
+      return;
+    }
     wss.handleUpgrade(request, socket, head, (ws) => {
       ws.peerId = crypto.randomUUID();
       ws.userId = identity.userId;
@@ -1703,6 +1738,7 @@ function createSignalingServer({
       if (statsTimer) clearInterval(statsTimer);
       for (const room of rooms.values()) clearRoom(room);
       await new Promise((resolve, reject) => {
+        for (const ws of rejectedSockets) ws.terminate();
         for (const ws of wss.clients) ws.close(1001, 'Server shutting down');
         wss.close((wsError) => {
           server.close((serverError) => {

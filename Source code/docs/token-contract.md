@@ -24,6 +24,7 @@ remain private and must never be committed to the repository.
 The JWT payload contains these claims. `role` is issued by the platform and defaults to `user`
 when omitted. Only the verified claim determines the site role; roles supplied in client
 messages are never trusted.
+The UI may decode the token to show or hide controls; the server is the only authority for permissions.
 
 | Claim      | Type        | Meaning                                                                    |
 | ---------- | ----------- | -------------------------------------------------------------------------- |
@@ -70,11 +71,18 @@ The real-time server handles authentication failures as follows:
 
 | Condition                                                               | Error code      | WebSocket close code | Handling                                                                                                                                                                                                           |
 | ----------------------------------------------------------------------- | --------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Token missing, malformed, signature invalid, or required claims invalid | `INVALID_TOKEN` | `4001`               | If the connection has been accepted, send the contract `error` message and close. If verification fails during the HTTP upgrade, reject the upgrade with an HTTP error because no WebSocket frame can be sent yet. |
-| Token has expired                                                       | `TOKEN_EXPIRED` | `4002`               | If the connection has been accepted, send the contract `error` message and close. If expiration is detected during the HTTP upgrade, reject the upgrade with an HTTP error.                                        |
+| Token missing, malformed, signature invalid, or required claims invalid | `INVALID_TOKEN` | `4001`               | Complete the WebSocket upgrade, send an `error` frame with `INVALID_TOKEN`, then close with `4001`. The unauthenticated socket is not added to rooms, active connection lists, or connection counts.                 |
+| Token has expired                                                       | `TOKEN_EXPIRED` | `4002`               | Complete the WebSocket upgrade, send an `error` frame with `TOKEN_EXPIRED`, then close with `4002`. Expiration is checked at connect time only, not during an established connection.                              |
+| User has an active administrator deny                                  | `USER_DENIED`   | `4006`               | Complete the WebSocket upgrade, send an `error` frame with `USER_DENIED`, then close with `4006`, including on reconnect. Administrators revoke access using the deny operation.                                  |
 
 The `error` frame shape and the other protocol error codes are defined in
-[websocket-contract.md](./websocket-contract.md).
+[websocket-contract.md](./websocket-contract.md). A verified non-admin connecting to `/ws/admin`
+receives `FORBIDDEN` and close code `1008`. Admin HTTP endpoints continue to return HTTP 401 for
+missing/invalid tokens and HTTP 403 for valid non-admin tokens.
+
+Token expiration is verified at connection time only; the server does not add a mid-connection
+expiration check. Administrators revoke access to active connections and prevent reconnection
+with the deny operation.
 
 ## Development-only test token helper
 
