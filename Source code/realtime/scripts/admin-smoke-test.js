@@ -55,6 +55,52 @@ function send(ws, message) {
   ws.send(JSON.stringify(message));
 }
 
+function websocketUrl(baseUrl, endpoint, token) {
+  const query = token === undefined ? '' : `?token=${encodeURIComponent(token)}`;
+  return `${baseUrl.replace('http', 'ws')}${endpoint}${query}`;
+}
+
+function receiveWebSocketError(url) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    let accepted = false;
+    let errorMessage = null;
+    let settled = false;
+    const timer = setTimeout(() => {
+      ws.terminate();
+      reject(new Error(`Timed out waiting for the WebSocket error and close from ${url}.`));
+    }, WAIT_MS);
+    ws.on('open', () => { accepted = true; });
+    ws.on('message', (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'error') errorMessage = message;
+      } catch (error) {
+        clearTimeout(timer);
+        settled = true;
+        reject(error);
+      }
+    });
+    ws.once('close', (code, reason) => {
+      if (settled) return;
+      clearTimeout(timer);
+      settled = true;
+      resolve({
+        accepted,
+        message: errorMessage,
+        closeCode: code,
+        reason: reason.toString(),
+      });
+    });
+    ws.on('error', (error) => {
+      if (accepted || settled) return;
+      clearTimeout(timer);
+      settled = true;
+      reject(error);
+    });
+  });
+}
+
 function makeToken(userId, username, role) {
   const payload = { userId, username };
   if (role !== undefined) payload.role = role;
@@ -63,31 +109,13 @@ function makeToken(userId, username, role) {
 
 async function connect(baseUrl, userId, username, role) {
   const token = makeToken(userId, username, role);
-  return createClient(`${baseUrl.replace('http', 'ws')}/ws?token=${encodeURIComponent(token)}`);
+  return createClient(websocketUrl(baseUrl, '/ws', token));
 }
 
 async function connectAdminFeed(baseUrl, token) {
   return createClient(
     `${baseUrl.replace('http', 'ws')}/ws/admin?token=${encodeURIComponent(token)}`,
   );
-}
-
-function expectUpgradeDenied(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
-    ws.on('error', () => {});
-    ws.once('open', () => reject(new Error('Expected the WebSocket upgrade to be denied.')));
-    ws.once('unexpected-response', (request, response) => {
-      const chunks = [];
-      response.on('data', (chunk) => chunks.push(chunk));
-      response.on('end', () =>
-        resolve({
-          status: response.statusCode,
-          body: JSON.parse(Buffer.concat(chunks).toString()),
-        }),
-      );
-    });
-  });
 }
 
 async function join(ws, room, settings) {
@@ -147,7 +175,56 @@ async function main() {
     const devToken = (await devTokenResponse.json()).token;
     assert.equal(jwt.verify(devToken, SECRET).role, 'admin');
 
+    const adminToken = makeToken('admin-api', 'Admin API', 'admin');
+    const userToken = makeToken('normal-api', 'Normal API');
+    const expiredAt = Math.floor(Date.now() / 1000) - 1;
+    const expiredToken = jwt.sign({
+      userId: 'unauth-expired',
+      username: 'Expired connection',
+      iat: expiredAt - 10,
+      exp: expiredAt,
+    }, SECRET, { algorithm: 'HS256' });
+    const invalidToken = jwt.sign(
+      { userId: 'unauth-invalid', username: 'Invalid connection' },
+      `${SECRET}-wrong`,
+      { algorithm: 'HS256', expiresIn: '1h' },
+    );
+    const connectionsBeforeAuthFailures = await fetch(`${baseUrl}/admin/stats`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    }).then((response) => response.json());
+    const authFailures = [
+      { label: 'missing token', token: undefined, code: 'INVALID_TOKEN', closeCode: 4001 },
+      { label: 'invalid token', token: invalidToken, code: 'INVALID_TOKEN', closeCode: 4001 },
+      { label: 'expired token', token: expiredToken, code: 'TOKEN_EXPIRED', closeCode: 4002 },
+    ];
+    for (const testCase of authFailures) {
+      const result = await receiveWebSocketError(
+        websocketUrl(baseUrl, '/ws', testCase.token),
+      );
+      assert.equal(result.accepted, true, `${testCase.label} should complete the upgrade`);
+      assert.equal(result.message?.code, testCase.code);
+      assert.equal(result.closeCode, testCase.closeCode);
+    }
+    const connectionsAfterAuthFailures = await fetch(`${baseUrl}/admin/connections`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    }).then((response) => response.json());
+    const statsAfterAuthFailures = await fetch(`${baseUrl}/admin/stats`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    }).then((response) => response.json());
+    assert.equal(statsAfterAuthFailures.connections, connectionsBeforeAuthFailures.connections);
+    assert(!connectionsAfterAuthFailures.some((connection) =>
+      ['unauth-invalid', 'unauth-expired'].includes(connection.user.userId),
+    ));
+    const deniedAdminFeed = await receiveWebSocketError(
+      websocketUrl(baseUrl, '/ws/admin', userToken),
+    );
+    assert.equal(deniedAdminFeed.accepted, true);
+    assert.equal(deniedAdminFeed.message?.code, 'FORBIDDEN');
+    assert.equal(deniedAdminFeed.closeCode, 1008);
+    pass('WebSocket authentication errors, close codes, and unauthenticated connection exclusion');
+
     const owner = await connectAndTrack('owner-1', 'Owner');
+    assert.equal(jwt.verify(makeToken('owner-1', 'Owner'), SECRET).role, undefined);
     const ownerJoined = await join(owner, 'kick-room');
     assert.equal(ownerJoined.you.role, 'user');
     assert.equal(ownerJoined.owner.userId, 'owner-1');
@@ -191,7 +268,7 @@ async function main() {
     send(owner, { type: 'kick', peerId: victim.peerId, reason: 'smoke test' });
     assert.equal((await kickedWait).reason, 'smoke test');
     assert.equal((await peerLeftWait).peerId, victim.peerId);
-    pass('verified roles, forged-role rejection, participant FORBIDDEN, and owner kick');
+    pass('verified roles, role-less defaults, forged-role rejection, participant FORBIDDEN, and owner kick');
 
     const fullOwner = await connectAndTrack('full-owner', 'Full owner');
     const fullJoined = await join(fullOwner, 'full-room', { maxPeers: 2 });
@@ -262,13 +339,6 @@ async function main() {
     const invalidSettings = waitFor(fullOwner, 'error');
     send(fullOwner, { type: 'update-settings', settings: { maxPeers: 5 } });
     assert.equal((await invalidSettings).code, 'INVALID_SETTING');
-    const adminToken = makeToken('admin-api', 'Admin API', 'admin');
-    const userToken = makeToken('normal-api', 'Normal API');
-    const deniedFeed = await expectUpgradeDenied(
-      `${baseUrl.replace('http', 'ws')}/ws/admin?token=${encodeURIComponent(userToken)}`,
-    );
-    assert.equal(deniedFeed.status, 403);
-    assert.equal(deniedFeed.body.code, 'FORBIDDEN');
     for (const endpoint of ['/admin/stats', '/admin/rooms']) {
       const response = await fetch(`${baseUrl}${endpoint}`, {
         headers: { Authorization: `Bearer ${userToken}` },
@@ -545,13 +615,12 @@ async function main() {
     );
     assert.equal(disconnectResponse.status, 200);
     await disconnected;
-    const deniedReconnect = await expectUpgradeDenied(
-      `${baseUrl.replace('http', 'ws')}/ws?token=${encodeURIComponent(
-        makeToken('denied-user', 'Denied user'),
-      )}`,
+    const deniedReconnect = await receiveWebSocketError(
+      websocketUrl(baseUrl, '/ws', makeToken('denied-user', 'Denied user')),
     );
-    assert.equal(deniedReconnect.status, 403);
-    assert.equal(deniedReconnect.body.code, 'USER_DENIED');
+    assert.equal(deniedReconnect.accepted, true);
+    assert.equal(deniedReconnect.message?.code, 'USER_DENIED');
+    assert.equal(deniedReconnect.closeCode, 4006);
     const liftResponse = await fetch(`${baseUrl}/admin/users/denied-user/deny`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${adminToken}` },

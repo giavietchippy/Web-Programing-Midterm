@@ -8,6 +8,12 @@ Connect to `ws://host/ws?token=<JWT>`. In a deployed HTTPS environment, use the 
 `wss://` URL. Admin live feed clients will connect to `ws://host/ws/admin?token=<JWT>`; this is a
 P2 endpoint. The JWT contract is documented in [token-contract.md](./token-contract.md).
 
+For both WebSocket endpoints, the server completes the upgrade before reporting authentication
+failures. It sends an `error` frame and then closes with the code listed below. Rejected sockets
+are not added to active connection counts or `/admin/connections`, and never enter a room;
+authentication failures are still counted in `errorsByCode`. HTTP 401/403 responses remain in
+effect for the `/admin/*` HTTP API.
+
 All application messages are JSON text frames using the envelope
 `{ "type": string, ...fields }`. Each connection receives a server-generated `peerId`, unique
 among the peers currently connected to the service. A `room` is a non-empty string. A connection
@@ -42,6 +48,7 @@ as supplied by the browser's WebRTC API.
 `room-state` and `joined` peer records use the site role (`user` or `admin`) in `role`. The
 owner is independently identified by `owner.userId` and `owner.peerId`; an admin joining a room
 is a participant unless that admin is explicitly the room owner.
+The UI may decode the token to show or hide controls; the server is the only authority for permissions.
 
 ### JSON examples
 
@@ -307,7 +314,7 @@ disconnect, not for an error.
 | `PEER_NOT_FOUND`       | A relay target is not a connected peer in the sender's current room.                                                                | No                 | N/A                  |
 | `BAD_MESSAGE`          | A frame is not valid JSON, has an unknown type, misses required fields, has invalid field types, or exceeds the message-size limit. | Yes                | `4004`               |
 | `TOO_MANY_CONNECTIONS` | The user exceeds the per-user connection limit.                                                                                     | Yes                | `4005`               |
-| `FORBIDDEN`            | The site role or current room role is not permitted to perform the requested action.                                                | No                 | N/A                  |
+| `FORBIDDEN`            | The site role or current room role is not permitted to perform the requested action. Room actions leave the connection open; a non-admin on `/ws/admin` is closed with policy-violation code `1008`. | No, except `/ws/admin` | `1008` on `/ws/admin` |
 | `ROOM_LOCKED`          | A non-owner, non-admin attempts to join a locked room.                                                                              | No                 | N/A                  |
 | `ROOM_CLOSED`          | An operation targets a room that has been closed.                                                                                   | No                 | N/A                  |
 | `BANNED_FROM_ROOM`     | A banned user attempts to rejoin before the room closes.                                                                            | No                 | N/A                  |
@@ -315,9 +322,11 @@ disconnect, not for an error.
 | `MAX_ROOMS_REACHED`    | Creating a room would exceed the global room limit.                                                                                 | No                 | N/A                  |
 | `USER_DENIED`          | An admin denies an active user's connections or a denied user attempts to reconnect (P2).                                           | Yes                | `4006`               |
 
-If authentication fails before the WebSocket is accepted, the server rejects the upgrade with an
-HTTP error instead; it cannot send a WebSocket `error` frame or close code in that case. Once the
-WebSocket is accepted, the server sends the `error` frame before closing as described above.
+Missing, invalid, or expired tokens and denied users receive their error frame after the WebSocket
+upgrade completes, then the connection closes with the corresponding code above. `TOO_MANY_CONNECTIONS`
+is likewise reported after upgrade. `FORBIDDEN` does not close a room connection; the `/ws/admin`
+non-admin case is the exception described in the table. Token expiry is checked at connect time
+only, not during an established connection; administrators revoke access with the deny operation.
 
 ## Limits
 
