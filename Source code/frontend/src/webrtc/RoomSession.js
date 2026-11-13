@@ -15,12 +15,14 @@ export const ERROR_TEXT = {
   BANNED_FROM_ROOM: 'You were banned from this room, so you cannot rejoin until the room closes.',
   INVALID_SETTING: 'That room setting is not valid.',
   ROOM_CLOSED: 'This room has been closed.',
+  ROOM_NOT_FOUND: 'This room does not exist in the platform database.',
+  SERVICE_UNAVAILABLE: 'Platform is temporarily unavailable. Try joining again.',
   MAX_ROOMS_REACHED: 'The server has reached its maximum number of rooms. Try again later.',
   NOT_IN_ROOM: 'You are not in a room yet.',
   PEER_NOT_FOUND: 'That participant is no longer in the room.'
 };
 // Errors that mean "the join was refused" (the WebSocket stays open, but we are not in the room).
-const JOIN_REFUSED = new Set(['ROOM_LOCKED', 'ROOM_FULL', 'BANNED_FROM_ROOM', 'MAX_ROOMS_REACHED', 'ROOM_CLOSED']);
+const JOIN_REFUSED = new Set(['ROOM_LOCKED', 'ROOM_FULL', 'BANNED_FROM_ROOM', 'MAX_ROOMS_REACHED', 'ROOM_CLOSED', 'ROOM_NOT_FOUND', 'SERVICE_UNAVAILABLE']);
 
 export const initialState = {
   status: 'idle', // idle | media | connecting | joining | connected | closed

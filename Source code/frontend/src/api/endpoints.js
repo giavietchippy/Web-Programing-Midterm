@@ -1,5 +1,5 @@
 // ============================================================================
-// REST API Contract v1.0 (rest-api-contract.md, platform backend / Member 3).
+// REST API Contract v1.1 (rest-api-contract.md, platform backend / Member 3).
 // All paths are relative to API_BASE (default "/api"). Authenticated calls send
 //   Authorization: Bearer <JWT>
 // Response shapes (frontend reads them in api/real.js; api/mock.js returns the same shapes):

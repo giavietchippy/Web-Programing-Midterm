@@ -47,7 +47,7 @@ async function request(path, { method = 'GET', body, auth = true } = {}) {
 // POST /login -> { token, tokenType, expiresIn, user:{id,username,role} }
 export async function login(username, password) {
   const d = await request(E.login, { method: 'POST', body: { username, password }, auth: false });
-  const p = parseJwt(d.token) || {}; // payload: userId, username, iat, exp (no role in the token)
+  const p = parseJwt(d.token) || {}; // payload: userId, username, role, iat, exp
   return {
     token: d.token,
     userId: d.user?.id || p.userId,

@@ -43,7 +43,7 @@ export const getAudit = ({ limit = 100, action, room, user } = {}) => rt('/audit
 // ----- users (Member 3) -----
 export const listUsers = async ({ search, role } = {}) => (await platform('', { query: { search, role } })).users || [];
 export const createUser = async ({ username, password, role }) => (await platform('', { method: 'POST', body: { username, password, role } })).user;
-export const updateUser = async (id, patch) => (await platform(`/${enc(id)}`, { method: 'PATCH', body: patch })).user;
+export const updateUser = (id, patch) => platform(`/${enc(id)}`, { method: 'PATCH', body: patch });
 export const resetPassword = (id, password) => platform(`/${enc(id)}/password`, { method: 'POST', body: { password } });
 export const deleteUser = (id) => platform(`/${enc(id)}`, { method: 'DELETE' });
 

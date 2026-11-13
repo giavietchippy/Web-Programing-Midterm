@@ -36,8 +36,8 @@ export default function ChatPanel({ state, session }) {
       {chatOff && <div className="banner warn chat-off">Chat is turned off by the room owner.</div>}
       <form className="chat-form" onSubmit={submit}>
         <select value={transport} disabled={chatOff} onChange={(e) => setTransport(e.target.value)} title="How to send this message">
-          <option value="ws">via Server (WebSocket)</option>
-          <option value="p2p">via P2P (DataChannel)</option>
+          <option value="ws">via Server (saved history)</option>
+          <option value="p2p">via P2P (not saved)</option>
         </select>
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder={chatOff ? 'Chat is disabled' : 'Type a message…'} maxLength={2000} disabled={chatOff} />
         <button type="submit" disabled={state.status !== 'connected' || chatOff}>Send</button>

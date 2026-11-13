@@ -18,6 +18,9 @@ server {
     add_header Cache-Control "no-store";
   }
 
+  # Internal service-to-service endpoints MUST NOT be reachable from public Nginx.
+  location ^~ /internal/ { return 404; }
+
   # REST API -> Member 3 (platform backend)
   location /api/ {
     proxy_pass ${API_UPSTREAM};

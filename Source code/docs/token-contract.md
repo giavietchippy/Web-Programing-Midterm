@@ -1,7 +1,6 @@
 # Token Contract v1.1
 
-This document defines proposed v1.1 authentication-token changes. **Needs approval from all 3
-members before freeze.**
+This document defines the approved v1.1 authentication-token contract. **Approved by all 3 members.**
 
 ## Issuance and verification
 
