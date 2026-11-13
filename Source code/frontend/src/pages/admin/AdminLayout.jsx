@@ -19,7 +19,23 @@ const FEED_TEXT = { live: 'Live feed connected', connecting: 'Connecting to live
 
 function FeedPill() {
   const { status } = useFeed();
-  return <span className={`pill ${status === 'live' ? 'connected' : status === 'down' ? 'closed' : 'connecting'}`}>{FEED_TEXT[status]}</span>;
+  const { closeCode } = useFeed();
+  const text = status === 'down' && closeCode ? `Live feed closed (${closeCode})` : FEED_TEXT[status];
+  return <span className={`pill ${status === 'live' ? 'connected' : status === 'down' ? 'closed' : 'connecting'}`}>{text}</span>;
+}
+
+// Shown when the live feed was closed on purpose by the server (4001/4002/4003/4006...).
+// The feed does NOT reconnect by itself in these cases, so the banner explains why and what to do.
+function FeedCloseBanner({ signOut }) {
+  const { status, closeCode, closeMessage } = useFeed();
+  if (status !== 'down' || !closeMessage) return null;
+  const needsLogin = closeCode === 4001 || closeCode === 4002;
+  return (
+    <div className="banner error" role="alert">
+      <span><Icon name="alert" size={16} /> {closeMessage} <span className="muted small">(code {closeCode}; the live feed will not reconnect automatically, pages keep refreshing by polling)</span></span>
+      {needsLogin && <button onClick={signOut}>Log in again</button>}
+    </div>
+  );
 }
 
 export default function AdminLayout() {
@@ -46,6 +62,7 @@ export default function AdminLayout() {
             </nav>
             <main className="admin-main">
               {isMockAdmin && <div className="banner info">Mock admin mode is ON: rooms, connections, config, audit and users below are fake data (set <code>USE_MOCK_ADMIN=false</code> to use the real servers).</div>}
+              <FeedCloseBanner signOut={signOut} />
               <Outlet />
             </main>
           </div>

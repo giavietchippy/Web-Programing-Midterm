@@ -15,6 +15,7 @@
 import { config, buildAdminWsUrl } from '../../config';
 import { getAuth } from '../storage';
 import { adminRequest } from './http';
+import { isFinalClose } from '../../utils/closeCodes';
 
 const rt = (path, opts) => adminRequest(config.RT_ADMIN_BASE, path, opts);
 const platform = (path, opts) => adminRequest(config.API_BASE, `/admin/users${path}`, opts);
@@ -48,7 +49,9 @@ export const deleteUser = (id) => platform(`/${enc(id)}`, { method: 'DELETE' });
 
 // ----- live feed: ws://host/ws/admin?token=<JWT> -----
 // Events: stats (every 2 s), room-created, room-updated, room-closed, peer-joined, peer-left, audit.
-// onStatus('connecting' | 'live' | 'down'). Reconnects with backoff until the returned function is called.
+// onStatus('connecting' | 'live' | 'down', detail). detail = { code } on 'down' (the WebSocket close code).
+// Reconnects with backoff until the returned function is called, EXCEPT after a final close code
+// (4000-4006: bad/expired token, rate limit, denied...) - the server refused us on purpose, so retrying would loop.
 export function openFeed(onEvent, onStatus) {
   let ws = null;
   let stopped = false;
@@ -62,8 +65,8 @@ export function openFeed(onEvent, onStatus) {
     ws.onopen = () => { attempt = 0; onStatus('live'); };
     ws.onmessage = (ev) => { try { onEvent(JSON.parse(ev.data)); } catch { /* ignore malformed frame */ } };
     ws.onclose = (ev) => {
-      onStatus('down');
-      if (stopped || ev.code === 4001 || ev.code === 4002) return; // bad/expired token: do not hammer the server
+      onStatus('down', { code: ev.code });
+      if (stopped || isFinalClose(ev.code)) return; // 4001/4002/4003/4006...: do not hammer the server
       timer = setTimeout(connect, Math.min(15000, 1000 * 2 ** attempt++));
     };
     ws.onerror = () => { /* onclose follows */ };
