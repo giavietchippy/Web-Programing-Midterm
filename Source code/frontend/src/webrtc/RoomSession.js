@@ -4,16 +4,8 @@
 // so a failure here can only produce a visible error message, never a blank page.
 import { PeerLink } from './PeerLink';
 import { buildWsUrl } from '../config';
+import { closeInfo } from '../utils/closeCodes';
 
-const CLOSE_MESSAGES = {
-  4001: 'Invalid token (INVALID_TOKEN). Check that JWT_SECRET is the same on platform and real-time services, then log in again.',
-  4002: 'Token expired (TOKEN_EXPIRED). Please log in again.',
-  4003: 'Too many messages (RATE_LIMITED, limit 30 per second).',
-  4004: 'Server rejected a message (BAD_MESSAGE).',
-  4005: 'Too many connections for this account (TOO_MANY_CONNECTIONS, max 3).',
-  4000: 'An administrator disconnected you.',
-  4006: 'Your account has been denied by an administrator (USER_DENIED). Try again later or contact an admin.'
-};
 
 // websocket-contract.md "Errors": friendly texts shown to the user (the raw server message goes to the ICE debug log).
 export const ERROR_TEXT = {
@@ -291,7 +283,7 @@ export class RoomSession {
 
   onWsClose(ev, ws) {
     if (this.closed || ws !== this.ws) return;
-    const msg = CLOSE_MESSAGES[ev.code] || (this.everOpened
+    const msg = closeInfo(ev.code)?.message || (this.everOpened
       ? `Signaling connection lost (code ${ev.code}).`
       : 'Cannot reach the signaling server (/ws). Check that the real-time server is running, the /ws proxy port is right, and the token is valid (a rejected upgrade also looks like this).');
     this.log('-', 'ws', `closed code=${ev.code}: ${msg}`);
