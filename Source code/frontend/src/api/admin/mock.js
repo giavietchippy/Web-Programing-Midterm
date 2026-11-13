@@ -254,7 +254,7 @@ export async function updateUser(id, patch) {
   if (patch.role !== undefined) { if (patch.role !== 'user' && patch.role !== 'admin') fail(400, 'VALIDATION_ERROR', 'role must be "user" or "admin".'); u.role = patch.role; }
   if (patch.disabled !== undefined) u.disabled = !!patch.disabled;
   saveUsers(list);
-  return pub(u);
+  return { user: pub(u), realtimeSync: true };
 }
 export async function resetPassword(id, password) {
   await wait(); me();

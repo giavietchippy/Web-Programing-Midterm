@@ -1,6 +1,6 @@
 # WebSocket Contract v1.1
 
-This document defines proposed v1.1 changes. **Needs approval from all 3 members before freeze.**
+This document defines proposed v1.1 changes. **Approved by all 3 members.**
 
 ## Connection and message format
 
@@ -22,7 +22,7 @@ as supplied by the browser's WebRTC API.
 
 | Type              | Sender                                               | Fields                                                                                                                            | Meaning                                                                                                                           |
 | ----------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `join`            | Client                                               | `room`, optional `settings` (room creator only)                                                                                   | Join the named room; the first join creates it and may set initial settings.                                                      |
+| `join`            | Client                                               | `room`, optional `settings` (room creator only)                                                                                   | Join the named room; first live join checks Platform `/internal/rooms/:roomId`, then creates live state. A missing room is rejected.                                                      |
 | `joined`          | Server, to the joiner only                           | `peerId`, `room`, `you`, `owner`, `settings`, `peers: [{peerId, userId, username, role}]`                                         | Confirms the join with caller, owner, settings and other peers.                                                                   |
 | `peer-joined`     | Server, to the other peers in the room               | `peerId`, `username`                                                                                                              | Announces a newly joined peer.                                                                                                    |
 | `leave`           | Client                                               | `room`                                                                                                                            | Leave the named room.                                                                                                             |
@@ -297,6 +297,14 @@ sequenceDiagram
 - On a normal `leave` or connection close, the server removes the peer from its room and sends
   `peer-left` to the remaining room members; this implies the peer's media-state is inactive.
 
+## Member 3 platform integration (approved v1.1)
+
+- The first live join calls the Platform `GET /internal/rooms/:roomId` before creating state. A missing room returns non-closing `ROOM_NOT_FOUND`; an unreachable platform returns non-closing `SERVICE_UNAVAILABLE`.
+- Platform deletion calls Real-time `POST /internal/rooms/:roomId/close` first; active peers get `room-closed`.
+- Platform role changes, blocks, or deletions call `POST /internal/users/:userId/revoke`. All sockets (including `/ws/admin`) are closed with `INVALID_TOKEN` (4001); tokens issued at or before `revokedAt` are rejected.
+- WebSocket `chat` is broadcast and asynchronously persisted via Platform `/internal/rooms/:roomId/messages`; P2P DataChannel chat is never stored.
+- Internal endpoints are authenticated with `X-Internal-Key` and MUST NOT be routed to public clients.
+
 ## Errors and close codes
 
 When an error closes a connection, the server sends the `error` message first, then closes the
@@ -309,6 +317,8 @@ disconnect, not for an error.
 | `INVALID_TOKEN`        | The token is missing, malformed, has an invalid signature, or has invalid required claims.                                          | Yes                | `4001`               |
 | `TOKEN_EXPIRED`        | The token's expiration time has passed.                                                                                             | Yes                | `4002`               |
 | `RATE_LIMITED`         | The connection exceeds the configured per-second message limit (30 by default).                                                     | Yes                | `4003`               |
+| `ROOM_NOT_FOUND`       | Platform has no persistent record for the requested room on first live join.                                         | No                 | N/A                  |
+| `SERVICE_UNAVAILABLE`  | Platform could not be reached during first live join.                                                              | No                 | N/A                  |
 | `ROOM_FULL`            | A join would exceed the room peer limit.                                                                                            | No                 | N/A                  |
 | `NOT_IN_ROOM`          | A room-scoped message is sent before joining, or `leave.room` does not match the connection's current room.                         | No                 | N/A                  |
 | `PEER_NOT_FOUND`       | A relay target is not a connected peer in the sender's current room.                                                                | No                 | N/A                  |

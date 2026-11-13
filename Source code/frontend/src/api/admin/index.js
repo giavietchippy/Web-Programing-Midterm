@@ -8,20 +8,16 @@ export const isMockAdmin = config.USE_MOCK_ADMIN;
 
 export const adminApi = {
   ...impl,
-  // "Block" = 2 calls from ONE button: Member 3 disables the account, Member 2 disconnects + denies the live sockets now.
-  // (If the account call fails nothing is half-done; if the deny call fails the account is still disabled and we say so.)
-  async blockUser(user, minutes = 60) {
-    await impl.updateUser(user.id, { disabled: true });
-    try {
-      await impl.denyUser(user.id, minutes);
-    } catch (e) {
-      e.message = `Account disabled, but the live disconnect failed: ${e.message}`;
-      throw e;
+  // Contract v1.1: Platform PATCH disables a user AND requests real-time revoke.
+  // No second /admin/users/:id/deny call is necessary.
+  async blockUser(user) {
+    const result = await impl.updateUser(user.id, { disabled: true });
+    if (result?.realtimeSync === false) {
+      throw new Error('Account disabled, but real-time revoke failed. Retry Block to sync active sessions.');
     }
   },
-  // Reverse: enable the account (Member 3) and lift the reconnect deny (Member 2).
   async unblockUser(user) {
     await impl.updateUser(user.id, { disabled: false });
-    try { await impl.allowUser(user.id); } catch (e) { e.message = `Account enabled, but lifting the deny failed: ${e.message}`; throw e; }
+    // Legacy deny (if an administrator separately used it) remains managed on Connections page.
   }
 };

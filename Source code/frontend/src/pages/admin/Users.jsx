@@ -70,19 +70,15 @@ function ResetPasswordModal({ user, onClose }) {
   );
 }
 
-// ONE button, TWO calls: Member 3 disables the account (/api/admin/users/:id) and
-// Member 2 disconnects the live sockets and denies reconnecting (/admin/users/:userId/deny).
+// Member 3 PATCH disables the account and revokes Member 2 sessions server-to-server.
 function BlockModal({ user, onClose, onDone }) {
-  const [minutes, setMinutes] = useState(60);
   const { run, busy } = useAction();
   const go = async () => {
-    if (await run(() => adminApi.blockUser(user, Number(minutes)), `${user.username} is blocked and was disconnected.`)) { onDone(); onClose(); }
+    if (await run(() => adminApi.blockUser(user), `${user.username} is blocked and was disconnected.`)) { onDone(); onClose(); }
   };
   return (
     <ConfirmModal title={`Block ${user.username}?`} confirmText="Block now" busy={busy} onConfirm={go} onClose={onClose}>
-      <p className="muted">This does two things at once: the account is <b>disabled</b> (cannot log in) and every live connection is <b>disconnected</b> immediately.</p>
-      <label>Also deny live reconnects for (minutes)<input type="number" min="1" max="525600" value={minutes} onChange={(e) => setMinutes(e.target.value)} /></label>
-      <p className="muted small">The account stays disabled until you press Unblock. The reconnect deny only covers sockets that already have a valid token.</p>
+      <p className="muted">The platform disables this account and asks the real-time service to revoke the user's existing sessions immediately. Retry if real-time sync fails.</p>
     </ConfirmModal>
   );
 }
@@ -129,7 +125,8 @@ export default function Users() {
                 <td>{dateTime(u.createdAt)}</td>
                 <td className="right actions">
                   {u.disabled
-                    ? <button className="secondary" disabled={busy} onClick={() => run(async () => { await adminApi.unblockUser(u); reload(true); }, `${u.username} is enabled again.`)}>Unblock</button>
+                    ? <><button className="secondary" disabled={busy} onClick={() => run(async () => { await adminApi.unblockUser(u); reload(true); }, `${u.username} is enabled again.`)}>Unblock</button>
+                    <button className="secondary" disabled={busy} onClick={() => run(() => adminApi.blockUser(u), `Revocation retried for ${u.username}.`)}>Retry revoke</button></>
                     : <button className="secondary" disabled={me(u)} onClick={() => setModal({ kind: 'block', user: u })}><Icon name="ban" size={14} /> Block</button>}
                   <button className="secondary" onClick={() => setModal({ kind: 'reset', user: u })}><Icon name="key" size={14} /> Reset password</button>
                   <button className="danger" disabled={me(u)} onClick={() => setModal({ kind: 'delete', user: u })}><Icon name="trash" size={14} /> Delete</button>
@@ -146,7 +143,7 @@ export default function Users() {
       {modal?.kind === 'delete' && (
         <ConfirmModal title={`Delete ${modal.user.username}?`} confirmText="Delete user" busy={busy} onClose={() => setModal(null)}
           onConfirm={async () => { if (await run(() => adminApi.deleteUser(modal.user.id), `${modal.user.username} deleted.`)) { setModal(null); reload(true); } }}>
-          <p className="muted">This permanently removes the account. Active sessions end when their token expires; use <b>Block</b> to cut them off immediately.</p>
+          <p className="muted">This permanently removes the account. Live connections are revoked by the platform before the account is deleted.</p>
         </ConfirmModal>
       )}
     </>

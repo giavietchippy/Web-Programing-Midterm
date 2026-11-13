@@ -23,6 +23,7 @@ const DEFAULT_CONFIG = {
 };
 const MAX_MESSAGE_SIZE = 64 * 1024;
 const MAX_HTTP_BODY_SIZE = 8 * 1024;
+const INTERNAL_TIMEOUT_MS = 3000;
 const MAX_TRANSPORT_PAYLOAD = 1024 * 1024;
 const OWNER_GRACE_MS = 30_000;
 const EMPTY_ROOM_TTL_MS = 30_000;
@@ -80,6 +81,7 @@ function verifyToken(token, secret) {
       userId: claims.userId,
       username: claims.username,
       role: claims.role || 'user',
+      iat: claims.iat,
     };
   } catch (error) {
     if (error instanceof jwt.TokenExpiredError) {
@@ -181,6 +183,13 @@ function createSignalingServer({
 
   const config = structuredClone(DEFAULT_CONFIG);
   const rooms = new Map();
+  const verifyingRooms = new Map();
+  const revokedUsers = new Map();
+  const platformUrl = process.env.PLATFORM_URL || 'http://127.0.0.1:3000';
+  const internalKey = process.env.INTERNAL_API_KEY;
+  if (!isNonEmptyString(internalKey) || internalKey.length < 24) {
+    throw new Error('INTERNAL_API_KEY must be configured and at least 24 characters long.');
+  }
   const connectionsByUser = new Map();
   const errorsByCode = new Map();
   const messageTimes = [];
@@ -188,8 +197,9 @@ function createSignalingServer({
   const deniedUsers = new Map();
   const auditEntries = [];
   const adminFeeds = new Set();
-  const dataDirectory = path.join(__dirname, 'data');
+  const dataDirectory = process.env.REALTIME_DATA_DIR ? path.resolve(process.env.REALTIME_DATA_DIR) : path.join(__dirname, 'data');
   const configPath = path.join(dataDirectory, 'config.json');
+  const revocationsPath = path.join(dataDirectory, 'revocations.json');
   const auditPath = path.join(dataDirectory, 'audit.jsonl');
   let auditWriteChain = Promise.resolve();
   let dataLoaded = false;
@@ -346,7 +356,59 @@ function createSignalingServer({
       if (error.code !== 'ENOENT')
         throw new Error(`Could not load persisted audit log: ${error.message}`);
     }
+    try {
+      const parsed = JSON.parse(await fs.readFile(revocationsPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [id, ts] of Object.entries(parsed)) {
+          if (isNonEmptyString(id) && Number.isInteger(ts) && ts > 0) revokedUsers.set(id, ts);
+        }
+      }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
     dataLoaded = true;
+  }
+
+  function checkInternalKey(request) {
+    const provided = request.headers['x-internal-key'];
+    const left = crypto.createHash('sha256').update(typeof provided === 'string' ? provided : '').digest();
+    const right = crypto.createHash('sha256').update(internalKey).digest();
+    return typeof provided === 'string' && crypto.timingSafeEqual(left, right);
+  }
+
+  function isRevoked(identity) {
+    const revokedAt = revokedUsers.get(identity.userId);
+    return Number.isInteger(revokedAt) && identity.iat <= revokedAt;
+  }
+
+  async function internalPlatformCall(method, route, body) {
+    const options = {
+      method,
+      headers: { 'X-Internal-Key': internalKey },
+      signal: AbortSignal.timeout(INTERNAL_TIMEOUT_MS),
+    };
+    if (body !== undefined) {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(body);
+    }
+    try {
+      return await fetch(new URL(route, platformUrl), options);
+    } catch (error) {
+      console.error(`Platform internal API (${route}) unreachable: ${error.message}`);
+      return null;
+    }
+  }
+
+  async function verifyPersistentRoom(id) {
+    const response = await internalPlatformCall('GET', `/internal/rooms/${encodeURIComponent(id)}`);
+    if (!response) return 'SERVICE_UNAVAILABLE';
+    if (response.status === 404) return 'ROOM_NOT_FOUND';
+    return response.ok ? null : 'SERVICE_UNAVAILABLE';
+  }
+
+  async function persistRevocations() {
+    await fs.mkdir(dataDirectory, { recursive: true });
+    const temporary = `${revocationsPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    await fs.writeFile(temporary, JSON.stringify(Object.fromEntries(revokedUsers)) + '\n', 'utf8');
+    await fs.rename(temporary, revocationsPath);
   }
 
   function takeHttpRateLimit(userId) {
@@ -592,7 +654,7 @@ function createSignalingServer({
     return validateRoomSettings(settings, room.settings, config.maxPeersPerRoom);
   }
 
-  function joinRoom(ws, message) {
+  async function joinRoom(ws, message) {
     if (!isNonEmptyString(message.room)) {
       sendError(
         ws,
@@ -606,6 +668,24 @@ function createSignalingServer({
     let room = rooms.get(roomId);
     let createdRoom = false;
 
+    if (!room) {
+      // Only a room stored by Member 3 may create a new live signaling room.
+      // Share the same in-flight check for concurrent first joins.
+      let check = verifyingRooms.get(roomId);
+      if (!check) {
+        check = verifyPersistentRoom(roomId);
+        verifyingRooms.set(roomId, check);
+        void check.finally(() => { if (verifyingRooms.get(roomId) === check) verifyingRooms.delete(roomId); });
+      }
+      const outcome = await check;
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (outcome) {
+        sendError(ws, outcome, outcome === 'ROOM_NOT_FOUND' ? 'Room does not exist.' : 'Platform is unavailable.');
+        return;
+      }
+      // An earlier simultaneous join may already have created the live room.
+      room = rooms.get(roomId);
+    }
     if (!room) {
       if (rooms.size >= config.maxRooms) {
         sendError(ws, 'MAX_ROOMS_REACHED', 'The server has reached its room limit.');
@@ -912,7 +992,10 @@ function createSignalingServer({
     ws.lastAction = message.type;
     switch (message.type) {
       case 'join':
-        joinRoom(ws, message);
+        void joinRoom(ws, message).catch((error) => {
+          console.error('Join failed:', error);
+          sendError(ws, 'SERVICE_UNAVAILABLE', 'Could not verify room.');
+        });
         break;
       case 'leave': {
         const room = ws.room && rooms.get(ws.room);
@@ -938,17 +1021,20 @@ function createSignalingServer({
       case 'chat': {
         const room = ws.room && rooms.get(ws.room);
         if (!room) sendError(ws, 'NOT_IN_ROOM', 'Join a room before sending this message.');
-        else if (typeof message.text !== 'string') {
-          sendError(ws, 'BAD_MESSAGE', 'chat.text must be a string.', CLOSE_CODES.BAD_MESSAGE);
+        else if (typeof message.text !== 'string' || !message.text.trim() || message.text.length > 2000) {
+          sendError(ws, 'BAD_MESSAGE', 'chat.text must have 1-2000 characters.', CLOSE_CODES.BAD_MESSAGE);
         } else if (!room.settings.chatEnabled && !canManage(room, ws)) {
           sendError(ws, 'FORBIDDEN', 'Chat is disabled by the room owner.');
         } else {
+          const ts = new Date().toISOString();
           broadcastRoom(room, {
-            type: 'chat',
-            from: ws.peerId,
-            username: ws.username,
-            text: message.text,
-            ts: new Date().toISOString(),
+            type: 'chat', from: ws.peerId, username: ws.username, text: message.text, ts,
+          });
+          // WebSocket-only history. DataChannel chat stays peer-to-peer and is never stored.
+          void internalPlatformCall('POST', `/internal/rooms/${encodeURIComponent(room.id)}/messages`, {
+            userId: ws.userId, username: ws.username, text: message.text, ts,
+          }).then((response) => {
+            if (!response || !response.ok) console.error('Chat storage failed:', room.id, response?.status || 'network');
           });
         }
         break;
@@ -1048,6 +1134,9 @@ function createSignalingServer({
         'denied',
       );
       return { status: 401, ...identity };
+    }
+    if (isRevoked(identity)) {
+      return { status: 401, error: 'INVALID_TOKEN', message: 'Session was revoked. Log in again.' };
     }
     if (identity.role !== 'admin') {
       errorsByCode.set('FORBIDDEN', (errorsByCode.get('FORBIDDEN') || 0) + 1);
@@ -1535,6 +1624,47 @@ function createSignalingServer({
     }
   }
 
+  async function handleInternalRequest(request, response, requestUrl) {
+    if (!checkInternalKey(request)) {
+      apiError(response, 401, 'UNAUTHORIZED', 'Invalid internal API key.');
+      return;
+    }
+    let match = /^\/internal\/rooms\/([^/]+)\/close$/.exec(requestUrl.pathname);
+    if (request.method === 'POST' && match) {
+      let roomId;
+      try { roomId = decodeURIComponent(match[1]); } catch { apiError(response, 400, 'BAD_MESSAGE', 'Invalid room ID.'); return; }
+      const raw = await readRequestBody(request);
+      let payload;
+      try { payload = raw ? JSON.parse(raw) : {}; } catch { apiError(response, 400, 'BAD_MESSAGE', 'Invalid JSON.'); return; }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+          (payload.reason !== undefined && (typeof payload.reason !== 'string' || payload.reason.length > 256))) {
+        apiError(response, 400, 'BAD_MESSAGE', 'Invalid reason.'); return;
+      }
+      const room = rooms.get(roomId);
+      if (room) closeRoom(room, payload.reason || 'Room deleted', { username: 'platform', role: 'system' });
+      sendJson(response, 200, { ok: true, closed: !!room });
+      return;
+    }
+    match = /^\/internal\/users\/([^/]+)\/revoke$/.exec(requestUrl.pathname);
+    if (request.method === 'POST' && match) {
+      let userId;
+      try { userId = decodeURIComponent(match[1]); } catch { apiError(response, 400, 'BAD_MESSAGE', 'Invalid user ID.'); return; }
+      if (!isNonEmptyString(userId) || userId.length > 256) { apiError(response, 400, 'BAD_MESSAGE', 'Invalid user ID.'); return; }
+      // Identical retries keep the same revokedAt (idempotent).
+      const previous = revokedUsers.get(userId);
+      const revokedAt = previous ?? Math.floor(Date.now() / 1000);
+      revokedUsers.set(userId, revokedAt);
+      try { await persistRevocations(); }
+      catch (error) { if (previous === undefined) revokedUsers.delete(userId); apiError(response, 500, 'INTERNAL_ERROR', 'Could not persist revocation.'); return; }
+      const matching = [...wss.clients].filter(ws => ws.userId === userId);
+      for (const ws of matching) sendError(ws, 'INVALID_TOKEN', 'Your session was revoked. Log in again.', 4001);
+      recordAudit({ username: 'platform', role: 'system' }, 'user-revoke', null, userId, { connections: matching.length });
+      sendJson(response, 200, { ok: true, disconnected: matching.length, revokedAt: new Date(revokedAt * 1000).toISOString() });
+      return;
+    }
+    apiError(response, 404, 'NOT_FOUND', 'Internal endpoint not found.');
+  }
+
   async function handleHttpRequest(request, response) {
     const origin = request.headers.origin;
     const allowedOrigin = !production && origin && isAllowedDevelopmentOrigin(origin);
@@ -1555,6 +1685,10 @@ function createSignalingServer({
       requestUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     } catch {
       sendJson(response, 400, { error: 'BAD_REQUEST', message: 'Invalid request URL.' });
+      return;
+    }
+    if (requestUrl.pathname.startsWith('/internal/')) {
+      await handleInternalRequest(request, response, requestUrl);
       return;
     }
     if (requestUrl.pathname.startsWith('/admin/')) {
@@ -1638,6 +1772,10 @@ function createSignalingServer({
         identity.message,
         CLOSE_CODES[identity.error],
       );
+      return;
+    }
+    if (isRevoked(identity)) {
+      closeRejectedWebSocket(request, socket, head, 'INVALID_TOKEN', 'Session revoked. Log in again.', CLOSE_CODES.INVALID_TOKEN, identity);
       return;
     }
     const denial = deniedUsers.get(identity.userId);
