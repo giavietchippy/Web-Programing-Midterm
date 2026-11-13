@@ -2,12 +2,14 @@
 // Events: stats (every 2 s), room-created, room-updated, room-closed, peer-joined, peer-left, audit.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { adminApi } from '../api/admin';
+import { closeInfo } from '../utils/closeCodes';
 
 const Ctx = createContext(null);
 const MAX_POINTS = 60; // 2 minutes of history at one point per 2 s
 
 export function AdminFeedProvider({ children }) {
   const [status, setStatus] = useState('connecting'); // connecting | live | down
+  const [closeCode, setCloseCode] = useState(null); // WebSocket close code of the last drop (4001, 4002, 4003, 4006...)
   const [stats, setStats] = useState(null);
   const [history, setHistory] = useState([]);
   const subs = useRef(new Set());
@@ -20,12 +22,13 @@ export function AdminFeedProvider({ children }) {
         setHistory((h) => [...h.slice(-(MAX_POINTS - 1)), { t: Date.now(), ...st }]);
       }
       subs.current.forEach((fn) => fn(ev));
-    }, setStatus);
+    }, (st, detail) => { setStatus(st); setCloseCode(st === 'down' ? detail?.code ?? null : null); });
     return close;
   }, []);
 
   const subscribe = useCallback((fn) => { subs.current.add(fn); return () => subs.current.delete(fn); }, []);
-  const value = useMemo(() => ({ status, stats, history, subscribe }), [status, stats, history, subscribe]);
+  const closeMessage = closeInfo(closeCode)?.message || null; // distinct text per close code
+  const value = useMemo(() => ({ status, closeCode, closeMessage, stats, history, subscribe }), [status, closeCode, closeMessage, stats, history, subscribe]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

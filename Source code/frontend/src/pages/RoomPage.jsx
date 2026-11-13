@@ -6,6 +6,9 @@ import { DEFAULT_ICE_SERVERS } from '../config';
 import { useAuth } from '../context/AuthContext';
 import { useSessionState } from '../hooks/useSessionState';
 import { getForceRelay } from '../utils/prefs';
+import { closeInfo } from '../utils/closeCodes';
+import { isExpired } from '../utils/jwt';
+import { probeSocket } from '../utils/probeSocket';
 import { RoomSession, badgesFor, deriveRoles } from '../webrtc/RoomSession';
 import ChatPanel from '../components/ChatPanel';
 import ControlsBar from '../components/ControlsBar';
@@ -56,6 +59,13 @@ export default function RoomPage() {
     (async () => {
       setBoot({ phase: 'loading', message: '' });
       setSession(null);
+      // Refused token: do not enter the room at all (no camera prompt, no REST call, no real join).
+      // Expired is known from the token itself; invalid (4001) / denied (4006) only the server can tell.
+      const refused = (code) => closeInfo(code) && setBoot({ phase: 'blocked', code, message: closeInfo(code).message });
+      if (isExpired(auth.token)) { refused(4002); return; }
+      const probe = await probeSocket(auth.token);
+      if (disposed) return;
+      if (!probe.ok) { refused(probe.code); return; }
       try {
         const r = await api.joinRoom(roomId); // REST check: room exists / user may enter. Then WS join uses room.id
         if (!disposed) setRoom(r);
@@ -85,6 +95,28 @@ export default function RoomPage() {
   const leave = () => { session?.close(); nav('/'); };
 
   if (boot.phase === 'loading') return <div className="center-page"><p>Preparing room…</p></div>;
+  // Server refused/closed the connection on purpose (4000-4006): replace the room with a clear screen.
+  // Used before entering (boot.phase 'blocked') and when the socket is closed while inside the room.
+  const blockedScreen = (code, message, canRetry) => {
+    const info = closeInfo(code);
+    const action = info?.action;
+    return (
+      <div className="center-page">
+        <div className="card blocked">
+          <div className="blocked-icon"><Icon name="alert" size={30} /></div>
+          <h2>{info?.title || 'Connection closed'}</h2>
+          <p className="blocked-msg">{message}</p>
+          <span className="blocked-code">Code {code}</span>
+          <div className="blocked-actions">
+            {action === 'login' && <button onClick={signOut}>Log in again</button>}
+            {action === 'retry' && canRetry && <button onClick={() => session?.reconnect()}>Reconnect</button>}
+            {action !== 'login' && <button className={action === 'retry' && canRetry ? 'secondary' : ''} onClick={() => nav('/')}>Back to lobby</button>}
+          </div>
+        </div>
+      </div>
+    );
+  };
+  if (boot.phase === 'blocked') return blockedScreen(boot.code, boot.message, false);
   if (boot.phase === 'error') {
     return (
       <div className="center-page">
@@ -94,6 +126,10 @@ export default function RoomPage() {
         </div>
       </div>
     );
+  }
+
+  if (state.status === 'closed' && state.error && closeInfo(state.closeCode)) {
+    return blockedScreen(state.closeCode, state.error, true);
   }
 
   const { isAdmin, canManage } = deriveRoles(state);
@@ -147,9 +183,13 @@ export default function RoomPage() {
       {state.error && (
         <div className="banner error">
           <span><Icon name="alert" size={16} /> {state.error}</span>
-          {state.closeCode === 4001 || state.closeCode === 4002
-            ? <button onClick={signOut}>Log in again</button>
-            : <button onClick={() => session?.reconnect()}>Reconnect</button>}
+          {(() => {
+            // 4001/4002: only a new login helps. 4006: retrying is refused, so go back. Others: manual reconnect only.
+            const action = closeInfo(state.closeCode)?.action;
+            if (action === 'login') return <button onClick={signOut}>Log in again</button>;
+            if (action === 'lobby') return <button onClick={() => nav('/')}>Back to lobby</button>;
+            return <button onClick={() => session?.reconnect()}>Reconnect</button>;
+          })()}
         </div>
       )}
 
