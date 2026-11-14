@@ -4,6 +4,7 @@
 
 - Node.js LTS and npm
 - A local `JWT_SECRET` shared with any platform service that issues tokens
+- An `INTERNAL_API_KEY` shared with the platform service and at least 24 characters long
 
 ## Start the server
 
@@ -14,19 +15,21 @@ npm install
 Copy-Item .env.example .env
 ```
 
-Set `JWT_SECRET` in `.env` to a private random value. Use the same value in the platform service.
-Never commit `.env` or generated tokens. Start the server with:
+Set `JWT_SECRET` and `INTERNAL_API_KEY` in `.env` to different private random values and use
+the same values in the platform service. `INTERNAL_API_KEY` must be at least 24 characters long.
+The supplied `.env.example` sets `PORT=3001`. Never commit `.env` or generated tokens. Start the
+server with:
 
 ```powershell
 npm start
 ```
 
-By default, the WebSocket endpoint is `ws://localhost:8080/ws` and the reference client is
-`http://localhost:8080/realtime/reference-client/`.
+With the supplied `.env.example`, the WebSocket endpoint is `ws://localhost:3001/ws` and the
+reference client is `http://localhost:3001/realtime/reference-client/`.
 
 ## Open the test client and get a development token
 
-Open `http://localhost:8080/realtime/reference-client` in two browser tabs. In each tab, enter a
+Open `http://localhost:3001/realtime/reference-client` in two browser tabs. In each tab, enter a
 different username and select **Get token**. The development-only `POST /dev/token` endpoint
 returns an HS256 JWT with a random `userId` and one-hour expiration. It is a stand-in for Member
 3's `POST /api/login` and is disabled when `NODE_ENV=production`.
@@ -64,12 +67,12 @@ Pass an admin JWT as `Authorization: Bearer <JWT>`. For example:
 
 ```powershell
 $token = (npm run --silent make:test-token -- Admin --role admin).Trim()
-Invoke-RestMethod http://localhost:8080/admin/stats -Headers @{ Authorization = "Bearer $token" }
-Invoke-RestMethod http://localhost:8080/admin/rooms -Headers @{ Authorization = "Bearer $token" }
-Invoke-RestMethod http://localhost:8080/admin/rooms/demo-room/close -Method Post `
+Invoke-RestMethod http://localhost:3001/admin/stats -Headers @{ Authorization = "Bearer $token" }
+Invoke-RestMethod http://localhost:3001/admin/rooms -Headers @{ Authorization = "Bearer $token" }
+Invoke-RestMethod http://localhost:3001/admin/rooms/demo-room/close -Method Post `
   -ContentType 'application/json' -Headers @{ Authorization = "Bearer $token" } `
   -Body '{"reason":"Meeting ended"}'
-Invoke-RestMethod http://localhost:8080/admin/rooms/demo-room/settings -Method Patch `
+Invoke-RestMethod http://localhost:3001/admin/rooms/demo-room/settings -Method Patch `
   -ContentType 'application/json' -Headers @{ Authorization = "Bearer $token" } `
   -Body '{"chatEnabled":false}'
 ```
@@ -85,7 +88,7 @@ queries. See the Admin API table in [the WebSocket contract](../docs/websocket-c
 evicting current peers. Config and the 5,000-entry in-memory audit ring are persisted under the
 git-ignored `data/` directory.
 
-Admins can connect to `ws://localhost:8080/ws/admin?token=<JWT>` for a live feed of two-second
+Admins can connect to `ws://localhost:3001/ws/admin?token=<JWT>` for a live feed of two-second
 stats and room, peer, and audit events. The feed is admin-only and server-to-client. Mute messages
 are best-effort P2P requests: a browser can ignore them because the signaling server does not
 control the media track.
@@ -98,6 +101,8 @@ Run the P1 and P2 room/admin checks with:
 npm run test:admin-smoke
 ```
 
+The smoke test starts a temporary local platform stub for room verification and message
+persistence. It does not require the platform service, a platform `.env`, or manual setup.
 The smoke test includes the 30-second owner transfer grace period, admin API/feed, audit,
 runtime config, mute requests, announcements, and user deny/disconnect.
 
