@@ -35,8 +35,10 @@ async function run(){
   const response=await fetch(`${base}/api/config/ice`,{headers:{Authorization:`Bearer ${token}`}});
   assert.equal(response.status,200);
   const data=await response.json();
-  assert.equal(data.iceServers.length,2);
-  const turns=data.iceServers[1];
+  assert(data.iceServers.some(server=>server.urls==='stun:stun.l.google.com:19302'));
+  assert(data.iceServers.some(server=>server.urls==='stun:turn.example.invalid:3478'));
+  const turns=data.iceServers.find(server=>server.username);
+  assert(turns);
   assert.deepEqual(turns.urls,['turn:turn.example.invalid:3478?transport=udp','turn:turn.example.invalid:3478?transport=tcp']);
   assert(!turns.urls.some(x=>x.startsWith('turns:')),'TLS url must not be advertised without a TLS cert');
   assert.match(turns.username,/^\d+:user-/);

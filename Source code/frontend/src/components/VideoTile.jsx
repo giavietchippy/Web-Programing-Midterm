@@ -18,7 +18,7 @@ export default function VideoTile({ stream, label, muted = false, mirror = false
     const play = () => {
       const p = v.play?.();
       if (p?.then) p.then(() => { if (active) setBlocked(false); })
-        .catch(() => { if (active) setBlocked(true); });
+        .catch((e) => { if (active && e?.name !== 'AbortError') setBlocked(true); });
     };
     // A remote video track may arrive in a muted state, then unmute once
     // ICE connects and frames begin. Retry playback at that point.
@@ -40,7 +40,7 @@ export default function VideoTile({ stream, label, muted = false, mirror = false
     <div className={`tile${screen ? ' screen' : ''}`}>
       <video ref={ref} autoPlay playsInline muted={muted || screen} className={mirror ? 'mirror' : ''} style={{ visibility: off ? 'hidden' : 'visible' }} />
       {off && <div className="avatar"><span style={avatarStyle}>{initial}</span></div>}
-      {blocked && <button className="play-btn" onClick={() => ref.current?.play().then(() => setBlocked(false))}><Icon name="play" size={14} /> Click to play</button>}
+      {blocked && <button className="play-btn" onClick={() => ref.current?.play().then(() => setBlocked(false)).catch(() => {})}><Icon name="play" size={14} /> Click to play</button>}
       {onManage && <button className="tile-menu" onClick={onManage} title={`Manage ${label}`} aria-label={`Manage ${label}`}><Icon name="more" size={18} /></button>}
       <div className="tile-label">{label}<RoleBadges roles={roles} />{badge && <em>{badge}</em>}</div>
     </div>
