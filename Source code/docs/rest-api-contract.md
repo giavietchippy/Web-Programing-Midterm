@@ -1,4 +1,4 @@
-# REST API Contract v1.1
+# REST API Contract v1.2 (session version revision)
 
 This document defines the REST API provided by the WebRTC meeting app's platform backend
 (`/platform`, owned by Member 3). The frontend (Member 1) consumes it. The real-time service
@@ -106,14 +106,15 @@ Response `200 OK`:
 }
 ```
 
-The JWT payload contains `userId`, `username`, `role`, `iat` and `exp`, signed with `HS256` and
+The JWT payload contains `userId`, `username`, `role`, `sessionVersion`, `iat` and `exp`, signed with `HS256` and
 `JWT_SECRET`, and expires one hour after issuance. `userId` is the same value as `user.id` and
 must be a string. `role` is `user` or `admin`, read from the database at login; a client can never
 choose its own role. The real-time service reads `role` from the verified claim for its `/admin/*`
 API and `/ws/admin` feed.
 
-On every protected REST request the platform also reads the user's current `role` and `disabled`
-flag from the database. A role change or a block therefore takes effect immediately for REST calls,
+On every protected REST request the platform also reads the user's current `role`, `disabled`,
+and `session_version` from the database. It rejects a JWT if its integer `sessionVersion`
+does not equal that value. A role change or a block therefore takes effect immediately for REST calls,
 even though an old token stays valid for up to one hour.
 
 The client uses the same token for REST (`Authorization` header) and for the WebSocket
@@ -268,8 +269,7 @@ Response `200 OK`:
     {
       "urls": [
         "turn:turn.example.com:3478?transport=udp",
-        "turn:turn.example.com:3478?transport=tcp",
-        "turns:turn.example.com:5349?transport=tcp"
+        "turn:turn.example.com:3478?transport=tcp"
       ],
       "username": "1794285000:user-123",
       "credential": "base64-hmac-value"
@@ -279,6 +279,11 @@ Response `200 OK`:
   "expiresAt": "2026-11-10T04:30:00.000Z"
 }
 ```
+
+By default the Platform advertises `turn:` UDP/TCP on port 3478 only. Coturn TLS on
+port 5349 is **not** configured in the demo deployment. Do not advertise a `turns:` URL
+until a real coturn TLS certificate is installed and `TURN_TLS_ENABLED=true` is set.
+The website Nginx HTTPS certificate is **not** a coturn TLS certificate.
 
 The platform builds the TURN credential with the standard "TURN REST API" scheme that coturn
 supports through `use-auth-secret`:
@@ -415,20 +420,24 @@ same with `"closed": false`; this is not an error.
 
 ### `POST /internal/users/:userId/revoke` (real-time)
 
-Takes away a user's live access, for example after a role change, a block or a deletion. Effects:
+Platform calls this after a role change, account block, password reset, or before
+account deletion. The request body is `{ "minSessionVersion": 3 }` (a non-negative integer).
+The server persists the maximum allowed minimum version per user and rejects JWTs
+whose `sessionVersion` is less than it. Older live WebSocket connections (including
+`/ws/admin`) receive `INVALID_TOKEN` and close code `4001`.
 
-1. Every socket of that `userId`, including `/ws/admin`, receives the `error` frame `INVALID_TOKEN`
-   with the message `Your session was revoked. Log in again.` and is closed with code `4001`.
-2. The service stores `revokedAt`, the current Unix time in seconds, for that user.
-3. From then on, a token for that user whose `iat` is less than or equal to `revokedAt` is rejected
-   with `INVALID_TOKEN` on WebSocket connection, on `/ws/admin` and on the admin HTTP API (HTTP 401).
-   A token issued after the revoke is accepted, so a demoted user simply logs in again and gets a
-   token with the new role.
+Response `200 OK`:
+`{ "ok": true, "disconnected": 2, "minSessionVersion": 3 }`.
 
-Request body: none. Response `200 OK`:
-`{ "ok": true, "disconnected": 2, "revokedAt": "2026-11-10T03:30:00.000Z" }`. The call is
-idempotent. `revokedAt` should be saved under the real-time `data/` directory like the runtime
-config; if it is lost after a restart, an old token stays usable only until it expires.
+Repeating the same version is idempotent: the service does not reject a new token
+issued with that version. Separate changes increment Platform's session version
+so the same-second `iat` problem does not arise. Real-time persists the minimum
+versions in a versioned JSON file under `data/`.
+
+Platform keeps a SQLite `pending_revocations` outbox when it cannot reach Real-time,
+and retries approximately every five seconds. REST invalidates old JWTs immediately
+from its `session_version` check. Any already-open sockets may remain usable while
+Real-time is offline and until revocation sync completes.
 
 ### Failure behaviour
 
@@ -544,6 +553,7 @@ sequenceDiagram
 | `JWT_SECRET`                       | Platform, real-time | Signs (platform) and verifies (real-time) the JWT.                                             |
 | `TURN_SECRET`                      | Platform, coturn    | Signs and verifies time-limited TURN credentials. Not `JWT_SECRET`.                            |
 | `INTERNAL_API_KEY`                 | Platform, real-time | Authenticates the `/internal/*` calls between the two services.                                |
+| `TRUST_PROXY`                     | Platform            | Set true only when Platform is accessible solely through trusted Nginx and the proxy overwrites `X-Forwarded-For`. |
 | `PLATFORM_PORT`                    | Platform            | Port of the REST service. Default `3000`, which the frontend proxy expects.                    |
 | `REALTIME_URL`                     | Platform            | Base URL the platform uses to reach the real-time service, for example `http://realtime:3001`. |
 | `PLATFORM_URL`                     | Real-time           | Base URL the real-time service uses to reach the platform, for example `http://platform:3000`. |
@@ -570,3 +580,16 @@ Implementations must not silently change the meaning or fields of a frozen contr
 | Room deletion      | Live room kept running                   | Platform closes the live room first; `502` if it cannot.               |
 | Access revocation  | Not defined                              | `POST /internal/users/:userId/revoke` on role change, block, deletion. |
 | Chat history       | Not stated                               | Only WebSocket chat is stored; P2P chat is not.                        |
+
+
+## Changes in v1.2 (compared with v1.1)
+
+- JWTs have the mandatory non-negative integer claim `sessionVersion`.
+- Platform stores `users.session_version`, checking it on every authenticated REST request.
+- Role changes, account blocking and password resets increment the version; unchanged
+  PATCH retries keep the current version. The Real-time internal revoke API receives
+  `{ "minSessionVersion": ... }` rather than a bodyless request.
+- Account reset (still `204`) and PATCH revokes are queued in SQLite and retried if Real-time
+  temporarily cannot be reached.
+- `TRUST_PROXY=false` by default. With a trusted Nginx-only ingress, `TRUST_PROXY=true`
+  allows IP-based rate limiting via a proxy-overwritten `X-Forwarded-For` header.

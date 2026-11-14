@@ -99,6 +99,7 @@ export class RoomSession {
     };
     this.listeners = new Set();
     this.links = new Map();
+    this.pendingSignals = new Map(); // candidates arriving before an initial offer
     this.hist = new Map();
     this.ws = null;
     this.everOpened = false;
@@ -444,6 +445,7 @@ export class RoomSession {
     const l = this.links.get(peerId);
     if (l) { l.close(); this.links.delete(peerId); }
     this.hist.delete(peerId);
+    this.pendingSignals.delete(peerId);
     this.log(peerId, 'room', 'peer left (all its media state cleared)');
     this.set((s) => {
       const { [peerId]: _p, ...peers } = s.peers;
@@ -458,8 +460,22 @@ export class RoomSession {
     this.ensurePeer(from);
     let link = this.links.get(from);
     if (!link) {
+      // ICE can precede the first offer on the signaling socket. Previously
+      // those candidates were silently dropped before PeerLink existed.
+      if (msg.type === 'ice-candidate') {
+        const pending = this.pendingSignals.get(from) || [];
+        if (pending.length < 128) pending.push(msg);
+        this.pendingSignals.set(from, pending);
+        this.log(from, 'ice', 'queued remote candidate before initial offer');
+        return;
+      }
       if (msg.type !== 'offer') return;
       link = this.ensureLink(from, false);
+      // Feed the offer first; PeerLink handles buffered early ICE afterward.
+      link.handleSignal(msg);
+      (this.pendingSignals.get(from) || []).forEach((candidate) => link.handleSignal(candidate));
+      this.pendingSignals.delete(from);
+      return;
     }
     link.handleSignal(msg);
   }
@@ -529,6 +545,7 @@ export class RoomSession {
   teardownLinks() {
     this.links.forEach((l) => l.close());
     this.links.clear();
+    this.pendingSignals.clear();
     this.hist.clear();
   }
 

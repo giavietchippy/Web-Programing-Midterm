@@ -1,0 +1,117 @@
+# From the repository root: docker compose up -d --build
+# HTTPS web gateway + frontend + platform + realtime + coturn.
+# Only gateway/TURN are published to host. Do not expose platform/realtime directly.
+services:
+  platform:
+    build:
+      context: ./Source code/platform
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PLATFORM_PORT: '3000'
+      PLATFORM_DATA_DIR: /app/data
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in root .env}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?Set INTERNAL_API_KEY in root .env}
+      REALTIME_URL: http://realtime:3001
+      TURN_HOST: ${TURN_HOST:?Set browser-visible TURN_HOST in root .env}
+      TURN_SECRET: ${TURN_SECRET:?Set TURN_SECRET in root .env}
+      TURN_TLS_ENABLED: 'false'
+      TURN_TTL: ${TURN_TTL:-3600}
+      TRUST_PROXY: 'true'
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in root .env}
+    volumes:
+      - platform-data:/app/data
+    expose:
+      - '3000'
+    networks: [app]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  realtime:
+    build:
+      context: ./Source code/realtime
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: '3001'
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in root .env}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?Set INTERNAL_API_KEY in root .env}
+      PLATFORM_URL: http://platform:3000
+      REALTIME_DATA_DIR: /app/data
+    volumes:
+      - realtime-data:/app/data
+    expose:
+      - '3001'
+    networks: [app]
+    depends_on:
+      platform:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./Source code/frontend
+    restart: unless-stopped
+    environment:
+      USE_MOCK_API: 'false'
+      USE_MOCK_ADMIN: 'false'
+      API_BASE: /api
+      RT_ADMIN_BASE: /realtime/admin
+      WS_URL: ''
+      DEV_TOKEN_URL: /dev/token
+      API_UPSTREAM: http://platform:3000
+      WS_UPSTREAM: http://realtime:3001
+    expose:
+      - '80'
+    networks: [app]
+    depends_on: [platform, realtime]
+
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    environment:
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
+    ports:
+      - '${HTTP_PORT:-8080}:80'
+      - '${HTTPS_PORT:-8443}:443'
+    volumes:
+      - ./deploy/nginx/gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+    networks: [app]
+    depends_on: [frontend, platform, realtime]
+
+  coturn:
+    image: coturn/coturn:4.18.0
+    restart: unless-stopped
+    command:
+      - -n
+      - --log-file=stdout
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --fingerprint
+      - --no-multicast-peers
+      - --no-loopback-peers
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET:?Set TURN_SECRET in root .env}
+      - --realm=${TURN_REALM:-webrtc-demo.local}
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --external-ip=${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP in root .env}
+    ports:
+      - '3478:3478/tcp'
+      - '3478:3478/udp'
+      - '49160-49200:49160-49200/udp'
+    networks: [app]
+
+volumes:
+  platform-data:
+  realtime-data:
+
+networks:
+  app:
+    driver: bridge

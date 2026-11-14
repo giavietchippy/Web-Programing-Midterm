@@ -1,10 +1,6 @@
-node_modules/
+node_modules
 .env
 .env.*
-data/
-logs/
-scripts/
-coturn/
-.git/
-npm-debug.log*
+!.env.example
+data
 *.log

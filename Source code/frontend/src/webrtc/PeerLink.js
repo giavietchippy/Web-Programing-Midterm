@@ -22,6 +22,7 @@ export class PeerLink {
     this.queue = Promise.resolve();
     this.sendChain = Promise.resolve();
     this.senders = new Map(); // streamId -> RTCRtpSender[]
+    this.pendingIce = []; // ICE may arrive before remote SDP via async signaling
     this.dc = null;
     this.incoming = null;
     this.prev = null;
@@ -60,7 +61,9 @@ export class PeerLink {
     };
     pc.ontrack = ({ track, streams }) => {
       const stream = streams[0] || new MediaStream([track]);
-      o.log('track', `remote ${track.kind} track received (stream ${stream.id.slice(0, 8)})`);
+      o.log('track', `remote ${track.kind} track received (stream ${stream.id.slice(0, 8)}, muted=${track.muted})`);
+      track.addEventListener('unmute', () => o.log('track', `remote ${track.kind} unmuted / frames available`));
+      track.addEventListener('mute', () => o.log('track', `remote ${track.kind} muted / media paused`));
       o.onStream(stream);
     };
     pc.ondatachannel = ({ channel }) => this.setupChannel(channel);
@@ -72,6 +75,8 @@ export class PeerLink {
       try {
         this.makingOffer = true;
         await pc.setLocalDescription();
+        // Never label an answer SDP as an offer during a renegotiation race.
+        if (pc.localDescription?.type !== 'offer') return;
         o.send({ type: 'offer', to: this.peerId, sdp: pc.localDescription.sdp });
         o.log('sdp', 'sent offer');
       } catch (e) {
@@ -128,6 +133,14 @@ export class PeerLink {
     const o = this.o;
 
     if (msg.type === 'ice-candidate') {
+      if (!msg.candidate) return;
+      // A candidate can be delivered before an offer/answer, even over an
+      // ordered WebSocket: WebRTC's local ICE gathering runs asynchronously.
+      if (!pc.remoteDescription) {
+        this.pendingIce.push(msg.candidate);
+        o.log('ice', 'queued early remote ICE candidate until SDP arrives');
+        return;
+      }
       try {
         await pc.addIceCandidate(msg.candidate);
         o.log('ice', `remote candidate: ${fmtCand(msg.candidate)}`);
@@ -148,12 +161,27 @@ export class PeerLink {
       if (collision) o.log('sdp', 'offer collision: polite peer rolls back and accepts');
       o.log('sdp', 'received offer');
       await pc.setRemoteDescription(description); // implicit rollback when needed
+      await this.flushPendingIce();
       await pc.setLocalDescription();
       o.send({ type: 'answer', to: this.peerId, sdp: pc.localDescription.sdp });
       o.log('sdp', 'sent answer');
     } else if (msg.type === 'answer') {
       o.log('sdp', 'received answer');
       await pc.setRemoteDescription(description);
+      await this.flushPendingIce();
+    }
+  }
+
+  async flushPendingIce() {
+    const candidates = this.pendingIce.splice(0);
+    for (const candidate of candidates) {
+      try {
+        await this.pc.addIceCandidate(candidate);
+        this.o.log('ice', `accepted buffered candidate: ${fmtCand(candidate)}`);
+      } catch (e) {
+        // The candidate may belong to a colliding/rolled-back offer.
+        this.o.log('ice', `buffered candidate rejected: ${e.message}`);
+      }
     }
   }
 
@@ -314,6 +342,7 @@ export class PeerLink {
 
   close() {
     this.closed = true;
+    this.pendingIce.length = 0;
     try { this.dc?.close(); } catch { /* noop */ }
     this.pc.ontrack = this.pc.onicecandidate = this.pc.onnegotiationneeded = null;
     try { this.pc.close(); } catch { /* noop */ }

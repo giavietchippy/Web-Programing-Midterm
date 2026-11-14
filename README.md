@@ -38,3 +38,8 @@ in their respective folders.
 
 The initial repository structure is in place. The team should review and agree on the contracts
 in `docs/` before the signaling protocol is treated as final.
+
+
+## Member 3: Full-app Docker + HTTPS + coturn
+
+See [DEPLOY_MEMBER3_GUIDE.md](DEPLOY_MEMBER3_GUIDE.md) for Windows/Docker Desktop setup, a single `.env` for JWT/internal/TURN secrets, Nginx HTTPS and TURN relay verification. Start from repository root with `docker compose up -d --build` after setup.

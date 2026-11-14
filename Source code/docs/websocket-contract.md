@@ -1,6 +1,6 @@
-# WebSocket Contract v1.1
+# WebSocket Contract v1.2 (session version revision)
 
-This document defines proposed v1.1 changes. **Approved by all 3 members.**
+The prior v1.1 contract was approved by the group. This v1.2 session-version revision requires a new review.
 
 ## Connection and message format
 
@@ -297,11 +297,11 @@ sequenceDiagram
 - On a normal `leave` or connection close, the server removes the peer from its room and sends
   `peer-left` to the remaining room members; this implies the peer's media-state is inactive.
 
-## Member 3 platform integration (approved v1.1)
+## Member 3 platform integration (v1.2 update)
 
 - The first live join calls the Platform `GET /internal/rooms/:roomId` before creating state. A missing room returns non-closing `ROOM_NOT_FOUND`; an unreachable platform returns non-closing `SERVICE_UNAVAILABLE`.
 - Platform deletion calls Real-time `POST /internal/rooms/:roomId/close` first; active peers get `room-closed`.
-- Platform role changes, blocks, or deletions call `POST /internal/users/:userId/revoke`. All sockets (including `/ws/admin`) are closed with `INVALID_TOKEN` (4001); tokens issued at or before `revokedAt` are rejected.
+- Platform role changes, blocks, password resets or deletions call `POST /internal/users/:userId/revoke` with body `{ "minSessionVersion": N }`. WebSockets whose `sessionVersion` is less than `N` (including `/ws/admin`) are closed with `INVALID_TOKEN` (4001); new connections and admin HTTP calls reject those older tokens. Repeated calls with the same minimum version are safe, and do not invalidate newly issued JWTs at the same version. Platform stores pending revokes and retries if Real-time is unavailable.
 - WebSocket `chat` is broadcast and asynchronously persisted via Platform `/internal/rooms/:roomId/messages`; P2P DataChannel chat is never stored.
 - Internal endpoints are authenticated with `X-Internal-Key` and MUST NOT be routed to public clients.
 
