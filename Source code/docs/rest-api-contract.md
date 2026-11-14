@@ -269,8 +269,7 @@ Response `200 OK`:
     {
       "urls": [
         "turn:turn.example.com:3478?transport=udp",
-        "turn:turn.example.com:3478?transport=tcp",
-        "turns:turn.example.com:5349?transport=tcp"
+        "turn:turn.example.com:3478?transport=tcp"
       ],
       "username": "1794285000:user-123",
       "credential": "base64-hmac-value"
@@ -280,6 +279,11 @@ Response `200 OK`:
   "expiresAt": "2026-11-10T04:30:00.000Z"
 }
 ```
+
+By default the Platform advertises `turn:` UDP/TCP on port 3478 only. Coturn TLS on
+port 5349 is **not** configured in the demo deployment. Do not advertise a `turns:` URL
+until a real coturn TLS certificate is installed and `TURN_TLS_ENABLED=true` is set.
+The website Nginx HTTPS certificate is **not** a coturn TLS certificate.
 
 The platform builds the TURN credential with the standard "TURN REST API" scheme that coturn
 supports through `use-auth-secret`:

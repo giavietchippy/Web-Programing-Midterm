@@ -91,16 +91,17 @@ export default function LobbyPage() {
               <input placeholder="Room ID" value={joinId} onChange={(e) => setJoinId(e.target.value)} />
               <button>Join</button>
             </form>
+            <label className="check">
+              <input type="checkbox" checked={relay} onChange={(e) => { setRelay(e.target.checked); setForceRelay(e.target.checked); }} />
+              Force TURN relay (iceTransportPolicy = relay). Requires a running coturn server; takes effect when you next join a room.
+            </label>
           </section>
 
           {isMock && <section className="card">
             <h3>Quick demo</h3>
             <p className="muted">Open this room in two tabs (log in as different users, e.g. <code>demo</code> and <code>admin</code>) to try a two-person call.</p>
             <button onClick={() => go('demo-room')}>Join “demo-room”</button>
-            <label className="check">
-              <input type="checkbox" checked={relay} onChange={(e) => { setRelay(e.target.checked); setForceRelay(e.target.checked); }} />
-              Force TURN relay (iceTransportPolicy = relay) — to demo STUN-only vs TURN fallback. Takes effect on next join.
-            </label>
+
           </section>}
         </div>
 

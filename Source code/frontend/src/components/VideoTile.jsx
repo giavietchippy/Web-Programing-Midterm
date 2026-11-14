@@ -12,10 +12,25 @@ export default function VideoTile({ stream, label, muted = false, mirror = false
     const v = ref.current;
     if (!v) return;
     if (v.srcObject !== stream) v.srcObject = stream || null;
-    if (stream) {
+    if (!stream) { setBlocked(false); return; }
+
+    let active = true;
+    const play = () => {
       const p = v.play?.();
-      if (p && p.then) p.then(() => setBlocked(false)).catch(() => setBlocked(true)); // autoplay policy
-    }
+      if (p?.then) p.then(() => { if (active) setBlocked(false); })
+        .catch(() => { if (active) setBlocked(true); });
+    };
+    // A remote video track may arrive in a muted state, then unmute once
+    // ICE connects and frames begin. Retry playback at that point.
+    const tracks = stream.getVideoTracks();
+    tracks.forEach((track) => track.addEventListener('unmute', play));
+    v.addEventListener('loadedmetadata', play);
+    play();
+    return () => {
+      active = false;
+      tracks.forEach((track) => track.removeEventListener('unmute', play));
+      v.removeEventListener('loadedmetadata', play);
+    };
   }, [stream]);
 
   const initial = (label || '?').trim().charAt(0).toUpperCase();
@@ -23,7 +38,7 @@ export default function VideoTile({ stream, label, muted = false, mirror = false
   const avatarStyle = { background: `linear-gradient(135deg, hsl(${hue} 85% 58%), hsl(${(hue + 40) % 360} 90% 62%))` };
   return (
     <div className={`tile${screen ? ' screen' : ''}`}>
-      <video ref={ref} autoPlay playsInline muted={muted} className={mirror ? 'mirror' : ''} style={{ visibility: off ? 'hidden' : 'visible' }} />
+      <video ref={ref} autoPlay playsInline muted={muted || screen} className={mirror ? 'mirror' : ''} style={{ visibility: off ? 'hidden' : 'visible' }} />
       {off && <div className="avatar"><span style={avatarStyle}>{initial}</span></div>}
       {blocked && <button className="play-btn" onClick={() => ref.current?.play().then(() => setBlocked(false))}><Icon name="play" size={14} /> Click to play</button>}
       {onManage && <button className="tile-menu" onClick={onManage} title={`Manage ${label}`} aria-label={`Manage ${label}`}><Icon name="more" size={18} /></button>}

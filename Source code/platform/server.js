@@ -281,7 +281,11 @@ async function handle(req,res) {
     const iceServers=[{urls:TURN_HOST?`stun:${TURN_HOST}:3478`:'stun:stun.l.google.com:19302'}];
     if(TURN_HOST&&TURN_SECRET) {
       const username=`${exp}:${user.id}`;
-      iceServers.push({urls:[`turn:${TURN_HOST}:3478?transport=udp`,`turn:${TURN_HOST}:3478?transport=tcp`,`turns:${TURN_HOST}:5349?transport=tcp`],username,credential:crypto.createHmac('sha1',TURN_SECRET).update(username).digest('base64')});
+      // Coturn is configured without TLS by default. Only advertise turns: after
+      // deploying a valid TURN TLS certificate and enabling TURN_TLS_ENABLED.
+      const urls=[`turn:${TURN_HOST}:3478?transport=udp`,`turn:${TURN_HOST}:3478?transport=tcp`];
+      if(process.env.TURN_TLS_ENABLED==='true') urls.push(`turns:${TURN_HOST}:5349?transport=tcp`);
+      iceServers.push({urls,username,credential:crypto.createHmac('sha1',TURN_SECRET).update(username).digest('base64')});
     } else if(!DEV) error(503,'TURN_NOT_CONFIGURED','TURN is not configured.');
     return send(res,200,{iceServers,ttl,expiresAt:new Date(exp*1000).toISOString()});
   }

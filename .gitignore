@@ -7,3 +7,10 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+
+# Generated demo certs and local database
+deploy/certs/*.pem
+deploy/certs/*.crt
+deploy/certs/*.key
+**/data/*.sqlite*
+**/data/revocations.json
