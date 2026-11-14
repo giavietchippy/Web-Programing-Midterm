@@ -278,7 +278,8 @@ async function handle(req,res) {
   if(p==='/api/config/ice' && method==='GET') {
     const ttl=Number.isInteger(TURN_TTL)&&TURN_TTL>0?TURN_TTL:3600;
     const exp=Math.floor(Date.now()/1000)+ttl;
-    const iceServers=[{urls:TURN_HOST?`stun:${TURN_HOST}:3478`:'stun:stun.l.google.com:19302'}];
+    const iceServers=[{urls:'stun:stun.l.google.com:19302'}];
+    if(TURN_HOST) iceServers.push({urls:`stun:${TURN_HOST}:3478`});
     if(TURN_HOST&&TURN_SECRET) {
       const username=`${exp}:${user.id}`;
       // Coturn is configured without TLS by default. Only advertise turns: after
