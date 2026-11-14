@@ -34,7 +34,12 @@ const PATHS = {
   key: <><circle cx="8" cy="15" r="4" /><path d="M11 12l9-9M16 7l3 3" /></>,
   edit: <path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4" />,
   arrowLeft: <path d="M19 12H5M11 6l-6 6 6 6" />,
-  info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8v.5" /></>
+  info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8v.5" /></>,
+  speaker: <><path d="M3 10v4h4l5 4V6L7 10z" /><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" /></>,
+  expand: <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />,
+  shrink: <path d="M21 3l-7 7M3 21l7-7M14 4v6h6M10 20v-6H4" />,
+  fullscreen: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
+  fullscreenExit: <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
 };
 
 export default function Icon({ name, size = 20 }) {

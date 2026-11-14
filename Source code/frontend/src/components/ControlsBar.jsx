@@ -1,7 +1,7 @@
 import Icon from './Icon';
 import { deriveRoles } from '../webrtc/RoomSession';
 
-export default function ControlsBar({ state, session, tab, panelOpen, setTab, setPanelOpen, onLeave, onEndRoom }) {
+export default function ControlsBar({ state, session, tab, panelOpen, setTab, setPanelOpen, onLeave, onEndRoom, onDevices }) {
   const sharing = !!state.localScreen;
   const hasAudio = !!state.localCamera?.getAudioTracks().length;
   const { canManage } = deriveRoles(state);
@@ -24,6 +24,10 @@ export default function ControlsBar({ state, session, tab, panelOpen, setTab, se
       <button className={sharing ? 'active' : ''} disabled={shareBlocked} title={shareBlocked ? 'Only the room owner or an admin can share their screen in this room.' : undefined} onClick={() => session?.toggleScreen()}>
         <span className="ico"><Icon name="screen" size={26} /></span>
         <span>{sharing ? 'Stop sharing' : 'Share screen'}</span>
+      </button>
+      <button className="secondary" onClick={onDevices} title="Choose microphone and speaker">
+        <span className="ico"><Icon name="speaker" size={26} /></span>
+        <span>Audio</span>
       </button>
       <span className="sep" />
       {tabs.map(([id, icon, text]) => (

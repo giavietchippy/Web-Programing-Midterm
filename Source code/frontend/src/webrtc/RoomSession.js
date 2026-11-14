@@ -5,6 +5,7 @@
 import { PeerLink } from './PeerLink';
 import { buildWsUrl } from '../config';
 import { closeInfo } from '../utils/closeCodes';
+import { getMicId, setMicId, getSpeakerId, setSpeakerId } from '../utils/prefs';
 
 
 // websocket-contract.md "Errors": friendly texts shown to the user (the raw server message goes to the ICE debug log).
@@ -36,6 +37,11 @@ export const initialState = {
   micOn: false,
   camOn: false,
   mediaError: null,
+  // audio device selection ('' = system default)
+  devices: { mics: [], speakers: [] }, // [{ deviceId, label }]
+  micId: '',
+  speakerId: '',
+  sinkSupported: false, // can this browser route playback to a chosen output device? (no on Safari)
   messages: [],
   transfers: [],
   iceLog: [],
@@ -95,6 +101,9 @@ export class RoomSession {
       ...initialState,
       room: opts.room,
       forceRelay: !!opts.forceRelay,
+      micId: getMicId(),
+      speakerId: getSpeakerId(),
+      sinkSupported: typeof HTMLMediaElement !== 'undefined' && typeof HTMLMediaElement.prototype.setSinkId === 'function',
       iceUrls: opts.iceServers.flatMap((s) => (Array.isArray(s.urls) ? s.urls : [s.urls]))
     };
     this.listeners = new Set();
@@ -140,6 +149,8 @@ export class RoomSession {
     this.set({ status: 'media' });
     await this.acquireMedia();
     if (this.closed) return;
+    this.onDeviceChange = () => this.handleDeviceChange();
+    navigator.mediaDevices?.addEventListener?.('devicechange', this.onDeviceChange);
     this.statsTimer = setInterval(() => this.tickStats(), 1000);
     this.connect();
   }
@@ -150,10 +161,12 @@ export class RoomSession {
       this.set({ mediaError: 'This browser/context cannot use the camera. Open the app via HTTPS or http://localhost (plain http://<LAN-IP> is blocked by browsers).' });
       return;
     }
+    // 'ideal' (not 'exact'): if the saved microphone is no longer plugged in we silently get the default one.
+    const audio = this.state.micId ? { deviceId: { ideal: this.state.micId } } : true;
     const attempts = [
-      { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: true },
+      { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio },
       { video: true, audio: false },
-      { video: false, audio: true }
+      { video: false, audio }
     ];
     let lastErr;
     for (const c of attempts) {
@@ -161,12 +174,18 @@ export class RoomSession {
         const stream = await navigator.mediaDevices.getUserMedia(c);
         if (this.closed) { stream.getTracks().forEach((t) => t.stop()); return; }
         this.localCamera = stream;
+        const mic = stream.getAudioTracks()[0];
+        const gotId = mic?.getSettings?.().deviceId;
         this.set({
           localCamera: stream,
           camOn: stream.getVideoTracks().length > 0,
-          micOn: stream.getAudioTracks().length > 0,
+          micOn: !!mic,
+          // the saved microphone was gone -> we got the default one, so show "System default"
+          micId: this.state.micId && gotId && gotId !== this.state.micId ? '' : this.state.micId,
           mediaError: null
         });
+        this.watchMic(mic);
+        this.refreshDevices(); // labels only become available after permission was granted
         this.log('-', 'media', `local media ready: ${stream.getTracks().map((t) => t.kind).join('+')}`);
         return;
       } catch (e) {
@@ -200,6 +219,115 @@ export class RoomSession {
         this.set({ mediaError: describeMediaError(e) });
       }
     }
+  }
+
+  // ----- audio devices (microphone / speaker) -----
+  async refreshDevices() {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      // 'default' / 'communications' are virtual aliases; the UI offers its own "System default" entry instead.
+      const list = (kind, fallback) => all
+        .filter((d) => d.kind === kind && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
+        .map((d, i) => ({ deviceId: d.deviceId, label: d.label || `${fallback} ${i + 1}` }));
+      if (this.closed) return;
+      this.set({ devices: { mics: list('audioinput', 'Microphone'), speakers: list('audiooutput', 'Speaker') } });
+    } catch (e) {
+      this.log('-', 'media', `enumerateDevices failed: ${e.name}`);
+    }
+  }
+
+  async handleDeviceChange() {
+    const before = this.state.devices;
+    await this.refreshDevices();
+    if (this.closed) return;
+    const { devices, micId, speakerId } = this.state;
+    const has = (arr, id) => arr.some((d) => d.deviceId === id);
+    const added = [...devices.mics, ...devices.speakers].some((d) => !has([...before.mics, ...before.speakers], d.deviceId));
+    // the device we were using was unplugged -> fall back to the system default
+    if (micId && !has(devices.mics, micId)) {
+      this.notify('warn', 'Your selected microphone was disconnected. Switched to the system default.');
+      await this.setMic('');
+      if (this.state.micId === micId) { setMicId(''); this.set({ micId: '' }); } // default also failed: at least stop showing the dead device
+    } else if (speakerId && !has(devices.speakers, speakerId)) {
+      this.notify('warn', 'Your selected speaker was disconnected. Switched to the system default.');
+      await this.setSpeaker('');
+      if (this.state.speakerId === speakerId) { setSpeakerId(''); this.set({ speakerId: '' }); }
+    } else if (added) {
+      this.notify('info', 'New audio device detected. Open "Audio" in the toolbar to use it.');
+    }
+  }
+
+  // If the microphone vanishes while in use (USB unplugged) the track ends: recover with the system default.
+  watchMic(track) {
+    if (!track) return;
+    track.onended = () => {
+      if (this.closed || this.localCamera?.getAudioTracks()[0] !== track) return;
+      this.notify('warn', 'Your microphone stopped (disconnected?). Trying the system default…');
+      this.setMic('');
+    };
+  }
+
+  /** Use another microphone. deviceId '' = system default. Keeps the mute state and does not renegotiate with peers. */
+  async setMic(deviceId) {
+    if (this.closed) return;
+    if (!navigator.mediaDevices?.getUserMedia) return this.notify('error', 'This browser cannot access the microphone.');
+    let newTrack;
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true });
+      newTrack = s.getAudioTracks()[0];
+    } catch (e) {
+      this.log('-', 'media', `switch microphone failed: ${e.name}`);
+      return this.notify('error', `Could not use that microphone: ${describeMediaError(e)}`);
+    }
+    if (!newTrack) return;
+    if (this.closed) { newTrack.stop(); return; }
+
+    const stream = this.localCamera;
+    const oldTrack = stream?.getAudioTracks()[0];
+    newTrack.enabled = oldTrack ? oldTrack.enabled : true; // keep "muted" muted
+
+    if (!stream) {
+      // joined without any device: first microphone ever -> create the local stream and offer it to everyone
+      this.localCamera = new MediaStream([newTrack]);
+      this.links.forEach((l) => l.addLocalStream(this.localCamera));
+      this.set({ localCamera: this.localCamera });
+    } else if (!oldTrack) {
+      // camera only so far: add an audio track (this one DOES renegotiate)
+      stream.addTrack(newTrack);
+      this.links.forEach((l) => l.addLocalTrack(newTrack, stream));
+    } else {
+      // normal case: swap the track inside the existing senders (same stream id, no new offer)
+      await Promise.all([...this.links.values()].map(async (l) => {
+        try {
+          if (!(await l.replaceTrack(stream, 'audio', newTrack))) l.addLocalTrack(newTrack, stream);
+        } catch (e) { this.log(l.peerId, 'media', `replaceTrack failed: ${e.message}`); }
+      }));
+      oldTrack.onended = null;
+      stream.removeTrack(oldTrack);
+      oldTrack.stop();
+      stream.addTrack(newTrack);
+    }
+
+    this.watchMic(newTrack);
+    setMicId(deviceId);
+    this.set({ micId: deviceId, micOn: newTrack.enabled });
+    this.announceMedia('microphone');
+    this.refreshDevices();
+    this.log('-', 'media', `microphone -> ${newTrack.label || deviceId || 'system default'}`);
+  }
+
+  /** Play remote audio through another output device. deviceId '' = system default. VideoTile applies it via setSinkId. */
+  async setSpeaker(deviceId) {
+    if (!this.state.sinkSupported) return;
+    try {
+      await new Audio().setSinkId(deviceId); // validate first so a bad id never breaks playback
+    } catch (e) {
+      this.log('-', 'media', `setSinkId failed: ${e.name}`);
+      return this.notify('error', `Could not use that speaker: ${e.message || e.name}`);
+    }
+    setSpeakerId(deviceId);
+    this.set({ speakerId: deviceId });
   }
 
   toggleCam() {
@@ -426,9 +554,10 @@ export class RoomSession {
     if (this.closed) return;
     this.closed = true;
     clearInterval(this.statsTimer);
+    navigator.mediaDevices?.removeEventListener?.('devicechange', this.onDeviceChange);
     if (this.ws) { this.ws.onclose = null; try { this.ws.close(1000); } catch { /* noop */ } }
     this.teardownLinks();
-    this.localCamera?.getTracks().forEach((t) => t.stop());
+    this.localCamera?.getTracks().forEach((t) => { t.onended = null; t.stop(); });
     this.localScreen?.getTracks().forEach((t) => { t.onended = null; t.stop(); });
     this.set({ status: 'closed', ended, error: null, peers: {}, stats: {}, myPeerId: null, roster: [], localCamera: null, localScreen: null, camOn: false, micOn: false });
   }
@@ -612,9 +741,10 @@ export class RoomSession {
     } catch { /* noop */ }
     this.closed = true;
     clearInterval(this.statsTimer);
+    navigator.mediaDevices?.removeEventListener?.('devicechange', this.onDeviceChange);
     if (this.ws) { this.ws.onclose = null; try { this.ws.close(1000); } catch { /* noop */ } }
     this.teardownLinks();
-    this.localCamera?.getTracks().forEach((t) => t.stop());
+    this.localCamera?.getTracks().forEach((t) => { t.onended = null; t.stop(); });
     this.localScreen?.getTracks().forEach((t) => { t.onended = null; t.stop(); });
     this.listeners.clear();
   }
