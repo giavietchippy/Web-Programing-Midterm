@@ -2,3 +2,5 @@
 /data/config.json
 
 /data/revocations.json
+
+/coturn/turnserver.conf
