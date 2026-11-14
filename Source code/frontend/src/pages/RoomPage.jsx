@@ -1,5 +1,5 @@
 import Icon from '../components/Icon';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { DEFAULT_ICE_SERVERS } from '../config';
@@ -55,6 +55,25 @@ export default function RoomPage() {
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [focusKey, setFocusKey] = useState(null); // key of the tile enlarged into the main area (null = plain grid)
   const state = useSessionState(session);
+
+  // Auto-enlarge a screen share as soon as it starts - for the person sharing AND for everyone watching.
+  // Keys match the tile keys built below. Only a NEW share triggers it, so someone who clicked "back to grid"
+  // while a share is running is not pulled back in until another share starts.
+  const screenKeys = [];
+  if (state.localScreen) screenKeys.push('local-screen');
+  Object.values(state.peers).forEach((p) => {
+    const id = p.screen?.active ? p.screen.streamId : null;
+    if (id && p.streams[id]) screenKeys.push(`${p.peerId}:${id}`); // announced AND its stream has arrived
+  });
+  const screenSig = screenKeys.join('|');
+  const seenShares = useRef(new Set());
+  useEffect(() => {
+    const seen = seenShares.current;
+    const fresh = screenKeys.filter((k) => !seen.has(k));
+    seen.clear();
+    screenKeys.forEach((k) => seen.add(k)); // forget shares that ended, so the same key can trigger again later
+    if (fresh.length) setFocusKey(fresh[fresh.length - 1]);
+  }, [screenSig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let disposed = false;
