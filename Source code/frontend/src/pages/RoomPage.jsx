@@ -19,6 +19,7 @@ import VideoTile from '../components/VideoTile';
 import PeoplePanel from '../components/PeoplePanel';
 import RoomSettingsPanel from '../components/RoomSettingsPanel';
 import PeerManageModal from '../components/PeerManageModal';
+import DeviceSettingsModal from '../components/DeviceSettingsModal';
 import Modal from '../components/Modal';
 import { RoleBadges } from '../components/RoleBadge';
 
@@ -51,6 +52,8 @@ export default function RoomPage() {
   const [manage, setManage] = useState(null); // participant being managed (owner/admin only)
   const [endOpen, setEndOpen] = useState(false);
   const [endReason, setEndReason] = useState('');
+  const [devicesOpen, setDevicesOpen] = useState(false);
+  const [focusKey, setFocusKey] = useState(null); // key of the tile enlarged into the main area (null = plain grid)
   const state = useSessionState(session);
 
   useEffect(() => {
@@ -139,10 +142,12 @@ export default function RoomPage() {
   const hasLocalVideo = !!state.localCamera?.getVideoTracks().length;
   const peers = Object.values(state.peers);
 
-  const tiles = [
-    <VideoTile key="local" stream={state.localCamera} label={`${auth.username} (You)`} roles={badgesFor(state, state.myPeerId)} muted mirror off={!state.camOn || !hasLocalVideo} />
-  ];
-  if (state.localScreen) tiles.push(<VideoTile key="local-screen" stream={state.localScreen} label="Your screen" muted screen />);
+  // Every tile is described as { key, props } first, so the same tile can be drawn in the grid, in the
+  // enlarged main area or in the thumbnail strip.
+  const items = [];
+  const addTile = (key, props) => items.push({ key, props });
+  addTile('local', { stream: state.localCamera, label: `${auth.username} (You)`, roles: badgesFor(state, state.myPeerId), muted: true, mirror: true, off: !state.camOn || !hasLocalVideo });
+  if (state.localScreen) addTile('local-screen', { stream: state.localScreen, label: 'Your screen', muted: true, screen: true });
   peers.forEach((p) => {
     const screenId = p.screen?.active ? p.screen.streamId : null;
     const camStreams = Object.entries(p.streams).filter(([id]) => id !== screenId);
@@ -150,15 +155,22 @@ export default function RoomPage() {
     const roles = badgesFor(state, p.peerId);
     const onManage = canManage && rosterOf(p.peerId) ? () => setManage(rosterOf(p.peerId)) : undefined;
     if (camStreams.length === 0) {
-      tiles.push(<VideoTile key={`${p.peerId}:none`} stream={null} label={p.username} roles={roles} onManage={onManage} off badge={p.connectionState} />);
+      addTile(`${p.peerId}:none`, { stream: null, label: p.username, roles, onManage, off: true, badge: p.connectionState });
     }
     camStreams.forEach(([id, st]) =>
-      tiles.push(<VideoTile key={`${p.peerId}:${id}`} stream={st} label={p.username} roles={roles} onManage={onManage} off={camOff} badge={p.connectionState} />)
+      addTile(`${p.peerId}:${id}`, { stream: st, label: p.username, roles, onManage, off: camOff, badge: p.connectionState })
     );
     if (screenId && p.streams[screenId]) {
-      tiles.push(<VideoTile key={`${p.peerId}:${screenId}`} stream={p.streams[screenId]} label={`${p.username} — screen`} screen />);
+      addTile(`${p.peerId}:${screenId}`, { stream: p.streams[screenId], label: `${p.username} — screen`, screen: true });
     }
   });
+
+  // If the enlarged tile disappeared (peer left, screen share stopped) we simply fall back to the grid.
+  const focusedItem = items.find((it) => it.key === focusKey) || null;
+  const toggleFocus = (key) => setFocusKey((k) => (k === key ? null : key));
+  const renderTile = (it) => (
+    <VideoTile key={it.key} {...it.props} sinkId={state.speakerId} focused={focusedItem?.key === it.key} onToggleFocus={() => toggleFocus(it.key)} />
+  );
 
   return (
     <div className="room">
@@ -194,8 +206,22 @@ export default function RoomPage() {
       )}
 
       <div className="room-body">
-        <main className="stage">
-          <div className="grid">{tiles}</div>
+        <main className={`stage${focusedItem ? ' has-focus' : ''}`}>
+          {focusedItem ? (
+            <div className="focus-layout">
+              <div className="focus-main">{renderTile(focusedItem)}</div>
+              {items.length > 1 && (
+                <div className="strip">
+                  {items.filter((it) => it !== focusedItem).map((it) => (
+                    // clicking a thumbnail (but not one of its buttons) swaps it into the main area
+                    <div key={it.key} className="strip-item" onClick={(e) => { if (!e.target.closest('button')) setFocusKey(it.key); }}>{renderTile(it)}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="grid">{items.map(renderTile)}</div>
+          )}
         </main>
         {panelOpen && (
           <aside className="side">
@@ -209,7 +235,9 @@ export default function RoomPage() {
         )}
       </div>
 
-      <ControlsBar state={state} session={session} tab={activeTab} panelOpen={panelOpen} setTab={setTab} setPanelOpen={setPanelOpen} onLeave={leave} onEndRoom={() => setEndOpen(true)} />
+      <ControlsBar state={state} session={session} tab={activeTab} panelOpen={panelOpen} setTab={setTab} setPanelOpen={setPanelOpen} onLeave={leave} onEndRoom={() => setEndOpen(true)} onDevices={() => setDevicesOpen(true)} />
+
+      {devicesOpen && <DeviceSettingsModal state={state} session={session} onClose={() => setDevicesOpen(false)} />}
 
       {manage && <PeerManageModal state={state} session={session} target={manage} isAdmin={isAdmin} onClose={() => setManage(null)} />}
       {endOpen && (

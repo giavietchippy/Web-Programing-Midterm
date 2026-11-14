@@ -113,6 +113,17 @@ export class PeerLink {
     this.senders.set(stream.id, list);
   }
 
+  /**
+   * Swap the track a sender is sending WITHOUT renegotiation (used when the user picks another microphone).
+   * Returns false when this link has no sender of that kind yet (caller then falls back to addLocalTrack).
+   */
+  async replaceTrack(stream, kind, newTrack) {
+    const sender = (this.senders.get(stream.id) || []).find((s) => s.track?.kind === kind);
+    if (!sender) return false;
+    await sender.replaceTrack(newTrack);
+    return true;
+  }
+
   removeLocalStream(stream) {
     (this.senders.get(stream.id) || []).forEach((s) => {
       try { this.pc.removeTrack(s); } catch { /* connection closed */ }

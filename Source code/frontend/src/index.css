@@ -221,11 +221,32 @@ textarea:focus{outline:0;border-color:var(--primary);box-shadow:0 0 0 4px rgba(3
 .role-badge.admin{background:linear-gradient(135deg,#7c4dff,#b388ff);color:#fff}
 .role-badge.big{font-size:12.5px;padding:3px 12px 3px 9px;margin:0}
 .tile-label .role-badge{margin-left:8px}
-.tile-menu{
-  position:absolute;top:10px;right:10px;width:34px;height:34px;padding:0;border-radius:50%;display:grid;place-items:center;
+/* buttons in the top-right corner of a tile: enlarge / full screen / manage */
+.tile-actions{position:absolute;top:10px;right:10px;z-index:2;display:flex;gap:6px}
+.tile-btn{
+  width:34px;height:34px;padding:0;border-radius:50%;display:grid;place-items:center;
   background:rgba(15,34,54,.62);box-shadow:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
 }
-.tile-menu:hover:not(:disabled){background:rgba(15,34,54,.82);box-shadow:none}
+.tile-btn:hover:not(:disabled){background:rgba(15,34,54,.82);box-shadow:none}
+
+/* enlarged ("spotlight") layout: one big tile + a strip of thumbnails */
+.stage.has-focus{display:flex;flex-direction:column;overflow:hidden;min-height:0}
+.focus-layout{flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;padding:16px 20px}
+.focus-main{flex:1;min-height:0;display:flex}
+.focus-main .tile{flex:1;min-width:0;min-height:0;aspect-ratio:auto;max-height:none}
+.focus-main .tile video{object-fit:contain}
+.strip{flex:none;display:flex;gap:12px;overflow-x:auto;padding:2px 2px 6px}
+.strip-item{flex:none;cursor:pointer}
+.strip-item .tile{width:185px;height:104px;min-height:0;max-height:none;border-width:3px;border-radius:16px}
+.strip-item .tile-btn{width:26px;height:26px}
+.strip-item .tile-actions{top:6px;right:6px;gap:4px}
+.strip-item .tile-label{left:8px;bottom:8px;padding:2px 8px;font-size:11px}
+.strip-item .avatar span{width:44px;height:44px;font-size:20px}
+/* real full screen of one tile (the UA already pins width/height; we only lift our own limits) */
+.tile:fullscreen{max-height:none;border:0;border-radius:0}
+.tile:fullscreen video{object-fit:contain}
+.tile:-webkit-full-screen{max-height:none;border:0;border-radius:0}
+.tile:-webkit-full-screen video{object-fit:contain}
 
 .people{list-style:none;margin:0;padding:0 12px 12px}
 .people li{display:flex;align-items:center;gap:10px;padding:9px 6px;border-bottom:1px solid #e3edf7}
