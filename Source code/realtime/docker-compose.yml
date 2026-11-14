@@ -1,0 +1,33 @@
+services:
+  realtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PORT: "${PORT:-3001}"
+      NODE_ENV: "${NODE_ENV:-production}"
+      JWT_SECRET: "${JWT_SECRET:?Set JWT_SECRET in realtime/.env}"
+      INTERNAL_API_KEY: "${INTERNAL_API_KEY:?Set INTERNAL_API_KEY in realtime/.env (minimum 24 characters)}"
+      PLATFORM_URL: "${PLATFORM_URL:?Set PLATFORM_URL in realtime/.env}"
+    ports:
+      - "${PORT:-3001}:${PORT:-3001}"
+    volumes:
+      - realtime-data:/app/data
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:latest
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      # On Docker Desktop for Windows, keep this relay range small.
+      # Internet STUN/TURN tests need a public server and TURN_EXTERNAL_IP set during config rendering.
+      - "49160-49200:49160-49200/udp"
+      - "49160-49200:49160-49200/tcp"
+    restart: unless-stopped
+
+volumes:
+  realtime-data:
