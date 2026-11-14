@@ -48,7 +48,8 @@ See [DEPLOY_MEMBER3_GUIDE.md](DEPLOY_MEMBER3_GUIDE.md) for Windows/Docker Deskto
 
 1. **Prerequisites:** Install Git, Docker Desktop, and Chrome. On Windows, enable the WSL 2
    backend in Docker Desktop and make sure its engine is running. Node.js 24 is needed only if
-   running the services outside Docker.
+   running the services outside Docker. On macOS/Linux, install OpenSSL to generate `.env`
+   secrets with `setup-env.sh`.
 2. **Clone and check out `main`:**
 
    ```sh
@@ -70,13 +71,13 @@ See [DEPLOY_MEMBER3_GUIDE.md](DEPLOY_MEMBER3_GUIDE.md) for Windows/Docker Deskto
    on all operating systems:
 
    ```powershell
-   docker run --rm -v "${PWD}:/repo" alpine:3.21 sh -c "apk add --no-cache openssl >/dev/null && sh /repo/scripts/generate-local-cert.sh"
+   docker run --rm -v "${PWD}:/repo" alpine:3.21 sh -c "apk add --no-cache openssl >/dev/null && cd /repo/scripts && tr -d '\015' < /repo/scripts/generate-local-cert.sh | sh"
    ```
 
    On macOS/Linux, use `$(pwd)` for the volume path:
 
    ```sh
-   docker run --rm -v "$(pwd):/repo" alpine:3.21 sh -c "apk add --no-cache openssl >/dev/null && sh /repo/scripts/generate-local-cert.sh"
+   docker run --rm -v "$(pwd):/repo" alpine:3.21 sh -c "apk add --no-cache openssl >/dev/null && cd /repo/scripts && tr -d '\015' < /repo/scripts/generate-local-cert.sh | sh"
    ```
 
    Confirm `deploy/certs/fullchain.pem` and `deploy/certs/privkey.pem` exist. The PowerShell
@@ -106,10 +107,10 @@ See [DEPLOY_MEMBER3_GUIDE.md](DEPLOY_MEMBER3_GUIDE.md) for Windows/Docker Deskto
 
 ## Admin login
 
-The platform creates an admin from `ADMIN_USERNAME` and `ADMIN_PASSWORD` in the root `.env` only
-when its database has no admin account. The setup scripts set `ADMIN_USERNAME=admin` by default.
-They generate a random admin password unless you provide one. To read only the password line from
-your own `.env`:
+On startup, the platform creates an admin from `ADMIN_USERNAME` and `ADMIN_PASSWORD` in the root
+`.env` if its database has no admin account. This is the first-startup case with an empty
+`platform-data` volume. The setup scripts set `ADMIN_USERNAME=admin` by default and generate a
+random admin password unless you provide one. To read only the password line from your own `.env`:
 
 ```powershell
 Select-String -Path .env -Pattern '^ADMIN_PASSWORD='
