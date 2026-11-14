@@ -2,14 +2,63 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
+const http = require('node:http');
 const jwt = require('jsonwebtoken');
+const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
 const { createSignalingServer } = require('../server');
 
 const SECRET = 'admin-smoke-test-secret';
+const INTERNAL_API_KEY = 'admin-smoke-test-internal-api-key';
 const WAIT_MS = 40_000;
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function sendJson(response, status, body) {
+  response.writeHead(status, { 'Content-Type': 'application/json' });
+  response.end(JSON.stringify(body));
+}
+
+async function startPlatformStub() {
+  const server = http.createServer((request, response) => {
+    if (request.headers['x-internal-key'] !== INTERNAL_API_KEY) {
+      sendJson(response, 401, { error: 'UNAUTHORIZED' });
+      return;
+    }
+
+    const pathname = new URL(request.url, 'http://localhost').pathname;
+    const roomMatch = pathname.match(/^\/internal\/rooms\/([^/]+)$/);
+    if (request.method === 'GET' && roomMatch) {
+      const id = decodeURIComponent(roomMatch[1]);
+      sendJson(response, 200, { room: { id } });
+      return;
+    }
+
+    if (
+      request.method === 'POST' &&
+      /^\/internal\/rooms\/[^/]+\/messages$/.test(pathname)
+    ) {
+      request.resume();
+      sendJson(response, 201, { id: 'smoke-test-message' });
+      return;
+    }
+
+    sendJson(response, 404, { error: 'NOT_FOUND' });
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = server.address();
+  return { server, url: `http://127.0.0.1:${port}` };
+}
+
+function closeHttpServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
 
 function createClient(url) {
   return new Promise((resolve, reject) => {
@@ -150,9 +199,13 @@ async function requestJson(url, token, method, body) {
 }
 
 async function main() {
-  const app = createSignalingServer({ port: 0, secret: SECRET });
-  const address = await app.listen();
-  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const originalPlatformUrl = process.env.PLATFORM_URL;
+  const originalInternalApiKey = process.env.INTERNAL_API_KEY;
+  const originalRealtimeDataDir = process.env.REALTIME_DATA_DIR;
+  let platformStub;
+  let testDataDirectory;
+  let app;
+  let baseUrl;
   const sockets = [];
   const connectAndTrack = async (...args) => {
     const ws = await connect(baseUrl, ...args);
@@ -166,6 +219,16 @@ async function main() {
   };
 
   try {
+    testDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'wrtc-admin-smoke-'));
+    platformStub = await startPlatformStub();
+    process.env.PLATFORM_URL = platformStub.url;
+    process.env.INTERNAL_API_KEY = INTERNAL_API_KEY;
+    process.env.REALTIME_DATA_DIR = testDataDirectory;
+
+    app = createSignalingServer({ port: 0, secret: SECRET });
+    const address = await app.listen();
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
     const devTokenResponse = await fetch(`${baseUrl}/dev/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -640,7 +703,7 @@ async function main() {
     assert(audit.some((entry) => entry.action === 'mute-all'));
     assert(audit.some((entry) => entry.action === 'config-change'));
     const persistedAudit = await fs.readFile(
-      path.join(__dirname, '..', 'data', 'audit.jsonl'),
+      path.join(testDataDirectory, 'audit.jsonl'),
       'utf8',
     );
     assert(persistedAudit.split(/\r?\n/).some((line) => line.includes('"action":"user-deny"')));
@@ -653,7 +716,21 @@ async function main() {
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
         ws.terminate();
     }
-    await app.close();
+    try {
+      if (app) await app.close();
+    } finally {
+      try {
+        if (platformStub) await closeHttpServer(platformStub.server);
+      } finally {
+        if (originalPlatformUrl === undefined) delete process.env.PLATFORM_URL;
+        else process.env.PLATFORM_URL = originalPlatformUrl;
+        if (originalInternalApiKey === undefined) delete process.env.INTERNAL_API_KEY;
+        else process.env.INTERNAL_API_KEY = originalInternalApiKey;
+        if (originalRealtimeDataDir === undefined) delete process.env.REALTIME_DATA_DIR;
+        else process.env.REALTIME_DATA_DIR = originalRealtimeDataDir;
+        if (testDataDirectory) await fs.rm(testDataDirectory, { recursive: true, force: true });
+      }
+    }
   }
 }
 
