@@ -11,6 +11,10 @@ server {
 server {
     listen 443 ssl;
     server_name _;
+    resolver 127.0.0.11 valid=5s;
+    set $platform_upstream http://platform:3000;
+    set $realtime_upstream http://realtime:3001;
+    set $frontend_upstream http://frontend:80;
     ssl_certificate /etc/nginx/certs/fullchain.pem;
     ssl_certificate_key /etc/nginx/certs/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -23,7 +27,7 @@ server {
 
     # Browser REST requests: preserve path and overwrite spoofable client IP headers.
     location /api/ {
-        proxy_pass http://platform:3000;
+        proxy_pass $platform_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $remote_addr;
@@ -33,29 +37,32 @@ server {
     }
     # WebSocket signaling and /ws/admin
     location /ws {
-        proxy_pass http://realtime:3001;
+        proxy_pass $realtime_upstream;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
     # /realtime/admin/stats -> /admin/stats on realtime service.
     location /realtime/ {
-        proxy_pass http://realtime:3001/;
+        rewrite ^/realtime/(.*)$ /$1 break;
+        proxy_pass $realtime_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
     }
     location = /config.js {
-        proxy_pass http://frontend:80;
+        proxy_pass $frontend_upstream;
         add_header Cache-Control "no-store" always;
     }
     location / {
-        proxy_pass http://frontend:80;
+        proxy_pass $frontend_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
     }
