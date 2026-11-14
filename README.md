@@ -46,24 +46,60 @@ See [DEPLOY_MEMBER3_GUIDE.md](DEPLOY_MEMBER3_GUIDE.md) for Windows/Docker Deskto
 
 ## Run the full stack
 
-1. Install Node.js LTS and start Docker Desktop.
-2. From the repository root, create the private root `.env`:
+1. **Prerequisites:** Install Git, Docker Desktop, and Chrome. On Windows, enable the WSL 2
+   backend in Docker Desktop and make sure its engine is running. Node.js 24 is needed only if
+   running the services outside Docker.
+2. **Clone and check out `main`:**
+
+   ```sh
+   git clone https://github.com/giavietchippy/Web-Programing-Midterm.git
+   cd Web-Programing-Midterm
+   git switch main
+   ```
+
+   If running outside Docker after the `node_modules` files were removed from Git, run `npm install`
+   in each of `Source code`, `Source code/frontend`, `Source code/platform`, and `Source code/realtime`.
+3. **Create the root `.env`** from the repository root. On Windows, run
+   `.\scripts\setup-env.ps1`; if execution is blocked, use
    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-env.ps1`.
-   The script refuses to overwrite an existing `.env`; keep the generated `ADMIN_PASSWORD` private.
-3. Generate the local certificate with
-   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-local-cert.ps1`
-   (self-signed, valid 7 days), or `sh ./scripts/generate-local-cert.sh` (self-signed, valid 365
-   days). Browsers warn for self-signed certificates. The scripts refuse to overwrite existing
-   certificate files.
-4. Edit root `.env`: set `TURN_HOST` to a browser-reachable LAN IP or public VPS IP, never a
-   container/WSL `172.x` address. Allow Coturn TCP/UDP `3478` and its UDP relay range
-   `49160-49200` through the host firewall/NAT.
-5. After `node_modules` was removed from Git, each developer should run `npm install` in the
-   package directories they use (for example `Source code`, `Source code/frontend`, and
-   `Source code/realtime`).
-6. From the repository root, run `docker compose up -d --build`, then open
-   `https://localhost:8443` (or the HTTPS port configured by `HTTPS_PORT` in root `.env`; default
-   `8443`). Log in with `ADMIN_USERNAME` (default `admin`) and `ADMIN_PASSWORD` from root `.env`.
-   The platform seeds that admin only when no admin account already exists in its database.
-7. If the gateway returns 502 after a rebuild, run `docker compose restart gateway`.
-8. Stop the stack with `docker compose down`.
+   On macOS/Linux, run `bash scripts/setup-env.sh`. Never commit or share `.env`.
+4. **Set the TURN addresses** in `.env`: use the Wi-Fi/Ethernet IPv4 address for both
+   `TURN_HOST` and `TURN_EXTERNAL_IP` (find it with `ipconfig` on Windows or `ip addr` on
+   macOS/Linux). Never use a `172.x` WSL or Docker address.
+5. **Generate the 365-day local certificate** from the repository root. This Docker command works
+   on all operating systems:
+
+   ```powershell
+   docker run --rm -v "${PWD}:/repo" alpine:3.21 sh -c "apk add --no-cache openssl >/dev/null && sh /repo/scripts/generate-local-cert.sh"
+   ```
+
+   On macOS/Linux, use `$(pwd)` for the volume path:
+
+   ```sh
+   docker run --rm -v "$(pwd):/repo" alpine:3.21 sh -c "apk add --no-cache openssl >/dev/null && sh /repo/scripts/generate-local-cert.sh"
+   ```
+
+   Confirm `deploy/certs/fullchain.pem` and `deploy/certs/privkey.pem` exist. The PowerShell
+   certificate script is a less-preferred alternative and creates a 7-day certificate.
+6. **Build and start** from the repository root:
+
+   ```sh
+   docker compose up -d --build
+   docker compose ps
+   ```
+
+   Wait until every service is Up and the platform is healthy.
+7. Open `https://localhost:8443` in Chrome and accept the self-signed certificate warning. To
+   test a call, use two separate visible Chrome windows and allow camera and microphone access.
+8. **Admin login:** see [Admin login](#admin-login) below.
+9. **Stop** the stack with `docker compose down`.
+
+### Troubleshooting
+
+| Problem | What to do |
+| --- | --- |
+| 502 after a rebuild | Run `docker compose restart gateway`. |
+| Gateway will not start | Check that `deploy/certs/fullchain.pem` and `deploy/certs/privkey.pem` exist. |
+| Coturn is restarting | Run `docker compose logs coturn --tail 30`. |
+| Camera is blocked | Select the lock/site-controls icon in Chrome and allow camera and microphone access. |
+| Ports 8080, 8443, or 3478 are already in use | Change `HTTP_PORT` or `HTTPS_PORT` in `.env` for the gateway. Coturn's port 3478 and relay range 49160-49200 must also be free. |
