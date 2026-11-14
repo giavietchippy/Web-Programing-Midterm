@@ -43,3 +43,27 @@ in `docs/` before the signaling protocol is treated as final.
 ## Member 3: Full-app Docker + HTTPS + coturn
 
 See [DEPLOY_MEMBER3_GUIDE.md](DEPLOY_MEMBER3_GUIDE.md) for Windows/Docker Desktop setup, a single `.env` for JWT/internal/TURN secrets, Nginx HTTPS and TURN relay verification. Start from repository root with `docker compose up -d --build` after setup.
+
+## Run the full stack
+
+1. Install Node.js LTS and start Docker Desktop.
+2. From the repository root, create the private root `.env`:
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-env.ps1`.
+   The script refuses to overwrite an existing `.env`; keep the generated `ADMIN_PASSWORD` private.
+3. Generate the local certificate with
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-local-cert.ps1`
+   (self-signed, valid 7 days), or `sh ./scripts/generate-local-cert.sh` (self-signed, valid 365
+   days). Browsers warn for self-signed certificates. The scripts refuse to overwrite existing
+   certificate files.
+4. Edit root `.env`: set `TURN_HOST` to a browser-reachable LAN IP or public VPS IP, never a
+   container/WSL `172.x` address. Allow Coturn TCP/UDP `3478` and its UDP relay range
+   `49160-49200` through the host firewall/NAT.
+5. After `node_modules` was removed from Git, each developer should run `npm install` in the
+   package directories they use (for example `Source code`, `Source code/frontend`, and
+   `Source code/realtime`).
+6. From the repository root, run `docker compose up -d --build`, then open
+   `https://localhost:8443` (or the HTTPS port configured by `HTTPS_PORT` in root `.env`; default
+   `8443`). Log in with `ADMIN_USERNAME` (default `admin`) and `ADMIN_PASSWORD` from root `.env`.
+   The platform seeds that admin only when no admin account already exists in its database.
+7. If the gateway returns 502 after a rebuild, run `docker compose restart gateway`.
+8. Stop the stack with `docker compose down`.
