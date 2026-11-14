@@ -60,6 +60,13 @@ function closeHttpServer(server) {
   });
 }
 
+function terminateSockets(sockets) {
+  for (const ws of sockets) {
+    ws.removeAllListeners('error');
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.terminate();
+  }
+}
+
 function createClient(url) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
@@ -702,6 +709,9 @@ async function main() {
     assert(audit.some((entry) => entry.action === 'user-deny'));
     assert(audit.some((entry) => entry.action === 'mute-all'));
     assert(audit.some((entry) => entry.action === 'config-change'));
+    terminateSockets(sockets);
+    await app.close();
+    app = null;
     const persistedAudit = await fs.readFile(
       path.join(testDataDirectory, 'audit.jsonl'),
       'utf8',
@@ -711,11 +721,7 @@ async function main() {
 
     console.log(`PASS ${checks} P1/P2 smoke-test groups completed.`);
   } finally {
-    for (const ws of sockets) {
-      ws.removeAllListeners('error');
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
-        ws.terminate();
-    }
+    terminateSockets(sockets);
     try {
       if (app) await app.close();
     } finally {
