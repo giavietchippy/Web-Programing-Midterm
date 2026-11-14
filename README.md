@@ -103,3 +103,36 @@ See [DEPLOY_MEMBER3_GUIDE.md](DEPLOY_MEMBER3_GUIDE.md) for Windows/Docker Deskto
 | Coturn is restarting | Run `docker compose logs coturn --tail 30`. |
 | Camera is blocked | Select the lock/site-controls icon in Chrome and allow camera and microphone access. |
 | Ports 8080, 8443, or 3478 are already in use | Change `HTTP_PORT` or `HTTPS_PORT` in `.env` for the gateway. Coturn's port 3478 and relay range 49160-49200 must also be free. |
+
+## Admin login
+
+The platform creates an admin from `ADMIN_USERNAME` and `ADMIN_PASSWORD` in the root `.env` only
+when its database has no admin account. The setup scripts set `ADMIN_USERNAME=admin` by default.
+They generate a random admin password unless you provide one. To read only the password line from
+your own `.env`:
+
+```powershell
+Select-String -Path .env -Pattern '^ADMIN_PASSWORD='
+```
+
+```sh
+grep '^ADMIN_PASSWORD=' .env
+```
+
+A chosen password must be 8-72 UTF-8 bytes and cannot include quotes or line breaks. To change an
+admin password after the database has been initialized, run `docker compose down --volumes` and
+start the stack again; this deletes the persisted data.
+
+### For graders
+
+Run the setup script and log in with the resulting `ADMIN_USERNAME` and `ADMIN_PASSWORD` from your
+private `.env`. To use a chosen demo password, replace the obvious placeholder below with a private
+8-72 byte password; do not commit or share the generated `.env`.
+
+```powershell
+.\scripts\setup-env.ps1 -AdminPassword 'CHOOSE_A_PRIVATE_DEMO_PASSWORD'
+```
+
+```sh
+ADMIN_PASSWORD='CHOOSE_A_PRIVATE_DEMO_PASSWORD' bash scripts/setup-env.sh
+```
