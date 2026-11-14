@@ -13,3 +13,18 @@ TURN credentials are available when TURN_HOST and TURN_SECRET are set. Without t
 Implementation uses `crypto.scrypt` for password hashing (salted, secure), not bcrypt; the contract documents this explicitly.
 
 See `/HUONG_DAN_MEMBER3_TICH_HOP.md` supplied alongside the ZIP for Windows setup, file-by-file changes, and integration tests.
+
+
+## Session version and proxy updates (v1.2)
+
+- SQLite migration automatically adds `users.session_version` and a `pending_revocations`
+  outbox. **Do not delete existing `data/platform.sqlite`.**
+- Login JWTs include `sessionVersion`; old tokens without it require re-login.
+- A role change, block, or password reset invalidates previous versions.
+- Outbox retries pending Real-time revocations every 5 seconds when Real-time was offline.
+  REST enforces version changes immediately; active WebSockets may take until sync to close.
+- `TRUST_PROXY=false` for local Vite development. Set `true` only behind a trusted Nginx
+  reverse proxy that blocks direct access to Platform and overwrites `X-Forwarded-For`.
+- Run `node ../scripts/integration-test.cjs` and
+  `node ../scripts/session-version-test.cjs` from platform/ or use corresponding
+  `node scripts/...` commands from `Source code/`.

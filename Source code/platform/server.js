@@ -23,6 +23,18 @@ const TURN_SECRET = process.env.TURN_SECRET || '';
 const TURN_HOST = process.env.TURN_HOST || '';
 const TURN_TTL = Number(process.env.TURN_TTL || 3600);
 const DEV = process.env.NODE_ENV !== 'production';
+const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
+// Only enable when an explicitly trusted proxy is the sole ingress to Platform.
+// Nginx must overwrite, not append, X-Forwarded-For.
+function clientIp(req) {
+  if (TRUST_PROXY) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      return forwarded.split(',')[0].trim();
+    }
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
 if (!JWT_SECRET || JWT_SECRET.length < 24 || !INTERNAL_API_KEY || INTERNAL_API_KEY.length < 24) {
   throw new Error('JWT_SECRET and INTERNAL_API_KEY must both be set and at least 24 characters long.');
 }
@@ -48,7 +60,15 @@ db.exec(`PRAGMA foreign_keys=ON;
     user_id TEXT NOT NULL, username TEXT NOT NULL, text TEXT NOT NULL, ts TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id,seq);
+  CREATE TABLE IF NOT EXISTS pending_revocations (
+    user_id TEXT PRIMARY KEY, min_session_version INTEGER NOT NULL
+  );
 `);
+// Migration is safe for both existing and newly created SQLite databases.
+const userColumns = db.prepare('PRAGMA table_info(users)').all();
+if (!userColumns.some(column => column.name === 'session_version')) {
+  db.exec('ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0');
+}
 const uuid = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 const utc = () => new Date().toISOString();
 const text = (s) => typeof s === 'string' ? s : '';
@@ -74,7 +94,7 @@ function comparePassword(pw, stored) {
 function signJwt(user) {
   const now = Math.floor(Date.now() / 1000);
   const header = Buffer.from(JSON.stringify({ alg:'HS256', typ:'JWT' })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({ userId:user.id, username:user.username, role:user.role, iat:now, exp:now+3600 })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ userId:user.id, username:user.username, role:user.role, sessionVersion:user.session_version, iat:now, exp:now+3600 })).toString('base64url');
   const data = `${header}.${payload}`;
   const sig = crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
   return `${data}.${sig}`;
@@ -87,7 +107,7 @@ function parseJwt(token) {
   let header, payload;
   try { header=JSON.parse(Buffer.from(parts[0], 'base64url')); payload=JSON.parse(Buffer.from(parts[1], 'base64url')); }
   catch { error(401, 'INVALID_TOKEN', 'Invalid token.'); }
-  if (header.alg !== 'HS256' || !Number.isInteger(payload.iat) || !Number.isInteger(payload.exp) || typeof payload.userId!=='string')
+  if (header.alg !== 'HS256' || !Number.isInteger(payload.iat) || !Number.isInteger(payload.exp) || typeof payload.userId!=='string' || !Number.isSafeInteger(payload.sessionVersion) || payload.sessionVersion < 0)
     error(401,'INVALID_TOKEN','Invalid token.');
   const calculated=crypto.createHmac('sha256',JWT_SECRET).update(`${parts[0]}.${parts[1]}`).digest();
   let signature;
@@ -102,6 +122,7 @@ function authorized(request, admin=false) {
   const user=userRow(claims.userId);
   if(!user || user.username!==claims.username) error(401,'INVALID_TOKEN','Account no longer valid.');
   if(user.disabled) error(403,'ACCOUNT_DISABLED','Account is disabled.');
+  if(claims.sessionVersion !== user.session_version) error(401,'INVALID_TOKEN','Session revoked. Log in again.');
   if(admin && user.role!=='admin') error(403,'FORBIDDEN','Admin role required.');
   return user;
 }
@@ -154,20 +175,53 @@ async function callRealtime(endpoint, data) {
   } catch(e) { console.error('Real-time internal API unavailable:',e.message); error(502,'REALTIME_UNAVAILABLE','Real-time service is unavailable.'); }
   return result;
 }
+// Persistent outbox: retry realtime revokes after outages/restarts.
+function queueRevoke(id, minSessionVersion) {
+  db.prepare(`INSERT INTO pending_revocations (user_id, min_session_version)
+    VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET
+    min_session_version=MAX(min_session_version, excluded.min_session_version)`)
+    .run(id, minSessionVersion);
+}
+async function syncRevoke(id) {
+  const row = db.prepare('SELECT * FROM pending_revocations WHERE user_id=?').get(id);
+  if (!row) return true;
+  try {
+    await callRealtime(`/internal/users/${encodeURIComponent(id)}/revoke`,
+      { minSessionVersion: row.min_session_version });
+    // Never remove an event queued concurrently with a newer version.
+    db.prepare('DELETE FROM pending_revocations WHERE user_id=? AND min_session_version<=?')
+      .run(id, row.min_session_version);
+    return true;
+  } catch { return false; }
+}
+let revokeSyncRunning = false;
+async function retryPendingRevocations() {
+  if (revokeSyncRunning) return;
+  revokeSyncRunning = true;
+  try {
+    for (const { user_id } of db.prepare('SELECT user_id FROM pending_revocations').all())
+      await syncRevoke(user_id);
+  } finally { revokeSyncRunning = false; }
+}
+const revokeRetryTimer = setInterval(() => {
+  void retryPendingRevocations().catch(e => console.error('Revoke retry failed:', e.message));
+}, 5000);
+revokeRetryTimer.unref();
+
 function decodeId(value) { try { return decodeURIComponent(value); } catch { error(400,'VALIDATION_ERROR','Invalid identifier.'); } }
 async function handle(req,res) {
   const url=new URL(req.url,`http://${req.headers.host || 'localhost'}`);
   const p=url.pathname, method=req.method;
   if(p==='/health' && method==='GET') return send(res,200,{ok:true,service:'platform'});
   if(p==='/api/register' && method==='POST') {
-    rateLimit(`auth:${req.socket.remoteAddress}`,10,60000);
+    rateLimit(`auth:${clientIp(req)}`,10,60000);
     const b=await bodyJson(req);
     if(!validUsername(b.username)||!validPassword(b.password)) error(400,'VALIDATION_ERROR','Username or password is invalid.');
     const u=makeUser(b.username,b.password);
     return send(res,201,{user:{id:u.id,username:u.username,role:u.role,createdAt:u.created_at}});
   }
   if(p==='/api/login' && method==='POST') {
-    rateLimit(`auth:${req.socket.remoteAddress}`,10,60000);
+    rateLimit(`auth:${clientIp(req)}`,10,60000);
     const b=await bodyJson(req);
     if(typeof b.username!=='string'||typeof b.password!=='string') error(400,'VALIDATION_ERROR','Username and password required.');
     const u=findUser(b.username);
@@ -252,24 +306,43 @@ async function handle(req,res) {
       if(Object.hasOwn(b,'disabled')&&typeof b.disabled!=='boolean') error(400,'VALIDATION_ERROR','disabled must be boolean.');
       if(id===user.id && (b.disabled===true || (b.role!==undefined&&b.role!=='admin'))) error(403,'FORBIDDEN','Cannot disable/demote yourself.');
       const role=b.role??target.role, disabled=b.disabled===undefined?target.disabled:Number(b.disabled);
-      db.prepare('UPDATE users SET role=?, disabled=? WHERE id=?').run(role,disabled,id);
-      let synced=true;
-      if(Object.hasOwn(b,'role') || b.disabled===true) {
-        try{await callRealtime(`/internal/users/${encodeURIComponent(id)}/revoke`,{});}catch{synced=false;}
-      }
+      const changed = role !== target.role || disabled !== target.disabled;
+      // A new version invalidates all JWTs from before the change, even in the same second.
+      // Repeating an identical PATCH does not bump again, and is safe for retrying realtime sync.
+      const sessionVersion = target.session_version + (changed ? 1 : 0);
+      const shouldRevoke = Object.hasOwn(b,'role') || b.disabled===true;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare('UPDATE users SET role=?, disabled=?, session_version=? WHERE id=?')
+          .run(role,disabled,sessionVersion,id);
+        if (shouldRevoke) queueRevoke(id,sessionVersion);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      const synced = shouldRevoke ? await syncRevoke(id) : true;
       return send(res,200,{user:publicUser(userRow(id)),realtimeSync:synced});
     }
     if(method==='DELETE') {
       if(id===user.id) error(403,'FORBIDDEN','Cannot delete yourself.');
-      await callRealtime(`/internal/users/${encodeURIComponent(id)}/revoke`,{});
+      await callRealtime(`/internal/users/${encodeURIComponent(id)}/revoke`,
+        { minSessionVersion: target.session_version + 1 });
       db.prepare('DELETE FROM users WHERE id=?').run(id);
+      db.prepare('DELETE FROM pending_revocations WHERE user_id=?').run(id);
       return send(res,204);
     }
   }
   if((m=p.match(/^\/api\/admin\/users\/([^/]+)\/password$/)) && method==='POST') {
     const id=decodeId(m[1]); if(!userRow(id)) error(404,'USER_NOT_FOUND','User not found.');
     const b=await bodyJson(req); if(!validPassword(b.password)) error(400,'VALIDATION_ERROR','Password must be 8-72 bytes.');
-    db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hashPassword(b.password),id);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare('UPDATE users SET password_hash=?, session_version=session_version+1 WHERE id=?')
+        .run(hashPassword(b.password),id);
+      queueRevoke(id, userRow(id).session_version);
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    // Kept as 204 for contract compatibility; queued revocation is retried in background.
+    if (!(await syncRevoke(id)))
+      console.warn(`Password reset for ${id}: realtime revoke queued until connection recovers.`);
     return send(res,204);
   }
   if((m=p.match(/^\/internal\/rooms\/([^/]+)$/)) && method==='GET') {
@@ -308,5 +381,8 @@ const server=http.createServer((req,res)=>{ handle(req,res).catch(e=>{
   const headers={...(e.extra?.retryAfter?{'Retry-After':String(e.extra.retryAfter)}:{}),...(e.extra?.allow?{'Allow':e.extra.allow}:{})};
   send(res,status,{error:e.code||'INTERNAL_ERROR',message:status===500?'Internal server error.':e.message},headers);
 }); });
-if(require.main===module) server.listen(PORT,()=>console.log(`Platform REST listening on http://localhost:${PORT}`));
+if(require.main===module) server.listen(PORT,()=>{
+  console.log(`Platform REST listening on http://localhost:${PORT}`);
+  void retryPendingRevocations().catch(e => console.error('Initial revoke sync failed:', e.message));
+});
 module.exports={server,db};

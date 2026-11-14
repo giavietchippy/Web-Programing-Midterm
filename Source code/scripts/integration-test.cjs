@@ -17,6 +17,20 @@ const pause=(ms)=>new Promise(r=>setTimeout(r,ms));
 async function waitHealthy(url){ for(let i=0;i<70;i++){try{ const res=await fetch(url);if(res.status<500)return;}catch{}await pause(120)}throw Error('not healthy '+url)}
 async function http(path,token,method='GET',body){ const response=await fetch(`http://127.0.0.1:${port}${path}`,{method,headers:{...(token?{Authorization:`Bearer ${token}`}:{}) ,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body!==undefined?JSON.stringify(body):undefined});let b=null;try{b=await response.json()}catch{}return {status:response.status,body:b}; }
 function wsConnect(token){ return new Promise((resolve,reject)=>{const ws=new WebSocket(`ws://127.0.0.1:${realtimePort}/ws?token=${encodeURIComponent(token)}`);ws.once('open',()=>resolve(ws));ws.once('error',reject)})}
+// Subscribe before open: a rejected WebSocket can emit error+close immediately.
+function wsRejected(token) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${realtimePort}/ws?token=${encodeURIComponent(token)}`);
+    const timer = setTimeout(() => { socket.terminate(); reject(Error('timeout waiting for rejection')); }, 3000);
+    let settled = false;
+    socket.on('message', raw => {
+      const message = JSON.parse(raw);
+      if (!settled && message.type === 'error') { settled=true; clearTimeout(timer); resolve(message); }
+    });
+    socket.on('error', e => { if (!settled) { settled=true; clearTimeout(timer); reject(e); } });
+    socket.on('close', () => { if (!settled) { settled=true; clearTimeout(timer); reject(Error('closed without error response')); } });
+  });
+}
 function wsMessage(ws,check,timeout=2000){ return new Promise((resolve,reject)=>{let t;const f=(raw)=>{const m=JSON.parse(raw);if(check(m)){cleanup();resolve(m)}};const close=()=>{cleanup();reject(Error('closed before response'))};function cleanup(){clearTimeout(t);ws.off('message',f);ws.off('close',close)}ws.on('message',f);ws.on('close',close);t=setTimeout(()=>{cleanup();reject(Error('timeout waiting ws message'))},timeout)}) }
 async function step(){
 childP=spawn(process.execPath,['server.js'],{cwd:`${base}/platform`,env:{...process.env,PLATFORM_PORT:String(port),JWT_SECRET:jwtSecret,INTERNAL_API_KEY:internal,REALTIME_URL:`http://127.0.0.1:${realtimePort}`,ADMIN_USERNAME:'admin',ADMIN_PASSWORD:'admin-test-password-123',NODE_ENV:'development',PLATFORM_DATA_DIR:path.join(tmp,'platform')},stdio:['ignore','pipe','pipe']});
@@ -38,7 +52,7 @@ const uid=userLogin.body.user.id;
 const closed=new Promise((resolve,reject)=>{ws.on('close',(c)=>resolve(c));setTimeout(()=>reject(Error('close timeout')),3000)});
 const blocked=await http(`/api/admin/users/${uid}`,admin,'PATCH',{disabled:true});assert.equal(blocked.status,200,JSON.stringify(blocked)); assert.equal(blocked.body.realtimeSync,true);assert.equal(await closed,4001);
 const denied=await http('/api/me',user);assert.equal(denied.status,403);assert.equal(denied.body.error,'ACCOUNT_DISABLED');
-const replay=await wsConnect(user); const rejected=wsMessage(replay,m=>m.type==='error');assert.equal((await rejected).code,'INVALID_TOKEN');
+const rejected=await wsRejected(user);assert.equal(rejected.code,'INVALID_TOKEN');
 console.log('PASS user revoke/block and protected REST');
 const unblock=await http(`/api/admin/users/${uid}`,admin,'PATCH',{disabled:false});assert.equal(unblock.status,200);
 const roomWs=await wsConnect(admin);const j=wsMessage(roomWs,m=>m.type==='joined');roomWs.send(JSON.stringify({type:'join',room:roomId}));await j;

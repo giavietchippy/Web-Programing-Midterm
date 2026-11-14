@@ -1,6 +1,8 @@
-# Token Contract v1.1
+# Token Contract v1.2 (session version revision)
 
-This document defines the approved v1.1 authentication-token contract. **Approved by all 3 members.**
+This revision extends the previously approved v1.1 contract. **Review and approve the
+new session-version requirement before freezing v1.2.** Older JWTs lacking
+`sessionVersion` are intentionally rejected; users must log in again after deployment.
 
 ## Issuance and verification
 
@@ -14,7 +16,7 @@ remain private and must never be committed to the repository.
 
 ## Signing and claims
 
-| Property          | v1.1 value                                                                       |
+| Property          | v1.2 value                                                                       |
 | ----------------- | -------------------------------------------------------------------------------- |
 | Signing algorithm | `HS256`                                                                          |
 | Secret source     | `JWT_SECRET` environment variable, shared by the platform and real-time services |
@@ -30,6 +32,7 @@ The UI may decode the token to show or hide controls; the server is the only aut
 | `userId`   | String      | Stable identifier for the authenticated user.                              |
 | `username` | String      | Display name used by the signaling service.                                |
 | `role`     | String      | Optional site role: `user` or `admin`; absence means `user`.               |
+| `sessionVersion` | Integer | Non-negative, mandatory version of the user's authenticated sessions.     |
 | `iat`      | NumericDate | Issued-at time, in seconds since the Unix epoch.                           |
 | `exp`      | NumericDate | Expiration time, in seconds since the Unix epoch; one hour after issuance. |
 
@@ -40,6 +43,7 @@ Example payload (illustrative values only):
   "userId": "user-123",
   "username": "Alex",
   "role": "user",
+  "sessionVersion": 0,
   "iat": 1794281400,
   "exp": 1794285000
 }
@@ -52,6 +56,7 @@ Admin example:
   "userId": "admin-123",
   "username": "Project Admin",
   "role": "admin",
+  "sessionVersion": 0,
   "iat": 1794281400,
   "exp": 1794285000
 }
@@ -80,7 +85,12 @@ receives `FORBIDDEN` and close code `1008`. Admin HTTP endpoints continue to ret
 missing/invalid tokens and HTTP 403 for valid non-admin tokens.
 
 Token expiration is verified at connection time only; the server does not add a mid-connection
-expiration check. Administrators revoke access to active connections and prevent reconnection
+expiration check. Real-time checks the verified token's `sessionVersion` against
+its persisted minimum allowed version on each new connection and admin HTTP request.
+Platform increments a user's `session_version` on role changes, disabling an account,
+and password reset, then calls its internal revoke API with the new minimum version;
+connected sockets with older versions are closed. This avoids same-second timestamp
+collisions and supports repeated revoke events. Administrators revoke access to active connections and prevent reconnection
 with the deny operation.
 
 ## Development-only test token helper
@@ -101,5 +111,19 @@ The test-token helper accepts `--role admin` for admin test tokens, for example
 `npm run make:test-token -- Alice --role admin`. Never use the development helper or endpoint
 to issue production tokens.
 
-This v1.1 proposal **needs approval from all 3 members before it is frozen**. The platform login
+This v1.2 revision **needs approval from all 3 members before it is frozen**. The platform login
 service must be updated to issue only authorized role claims; clients cannot elevate their role.
+
+
+## v1.2 migration notes
+
+- The Platform adds `users.session_version INTEGER NOT NULL DEFAULT 0` with a safe migration.
+- Both production and development tokens must contain integer `sessionVersion` (development token helpers use `0`).
+- Real-time stores minimum versions in `data/revocations.json` as `{ "schemaVersion": 2, "versions": { "user-id": 1 } }`.
+  Legacy timestamp-only revocation files are ignored during migration because their values are not version numbers.
+  Previously issued tokens without the new claim are rejected and need a fresh login.
+- `POST /internal/users/:userId/revoke` now requires `{ "minSessionVersion": 1 }`; duplicate
+  requests with the same or a lower version do not invalidate newer tokens.
+- If Real-time is offline during a password reset/role change, Platform stores a pending
+  revocation in SQLite and retries periodically; REST tokens are rejected immediately,
+  but an already-open socket may remain active until reconnection and synchronization.

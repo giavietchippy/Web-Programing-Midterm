@@ -72,7 +72,8 @@ function verifyToken(token, secret) {
       !isNonEmptyString(claims.username) ||
       !Number.isInteger(claims.iat) ||
       !Number.isInteger(claims.exp) ||
-      (claims.role !== undefined && claims.role !== 'user' && claims.role !== 'admin')
+      (claims.role !== undefined && claims.role !== 'user' && claims.role !== 'admin') ||
+      !Number.isSafeInteger(claims.sessionVersion) || claims.sessionVersion < 0
     ) {
       return { error: 'INVALID_TOKEN', message: 'The JWT claims are invalid.' };
     }
@@ -82,6 +83,7 @@ function verifyToken(token, secret) {
       username: claims.username,
       role: claims.role || 'user',
       iat: claims.iat,
+      sessionVersion: claims.sessionVersion,
     };
   } catch (error) {
     if (error instanceof jwt.TokenExpiredError) {
@@ -184,7 +186,7 @@ function createSignalingServer({
   const config = structuredClone(DEFAULT_CONFIG);
   const rooms = new Map();
   const verifyingRooms = new Map();
-  const revokedUsers = new Map();
+  const minimumSessionVersions = new Map();
   const platformUrl = process.env.PLATFORM_URL || 'http://127.0.0.1:3000';
   const internalKey = process.env.INTERNAL_API_KEY;
   if (!isNonEmptyString(internalKey) || internalKey.length < 24) {
@@ -202,6 +204,7 @@ function createSignalingServer({
   const revocationsPath = path.join(dataDirectory, 'revocations.json');
   const auditPath = path.join(dataDirectory, 'audit.jsonl');
   let auditWriteChain = Promise.resolve();
+  let revocationWriteChain = Promise.resolve();
   let dataLoaded = false;
   const startedAt = Date.now();
   let peakConnections = 0;
@@ -358,10 +361,15 @@ function createSignalingServer({
     }
     try {
       const parsed = JSON.parse(await fs.readFile(revocationsPath, 'utf8'));
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        for (const [id, ts] of Object.entries(parsed)) {
-          if (isNonEmptyString(id) && Number.isInteger(ts) && ts > 0) revokedUsers.set(id, ts);
+      // Version 2 stores per-user minimum JWT session versions.
+      // Legacy revocations.json was a map of Unix timestamps; do not treat those as versions.
+      if (parsed?.schemaVersion === 2 && parsed.versions && typeof parsed.versions === 'object') {
+        for (const [id, version] of Object.entries(parsed.versions)) {
+          if (isNonEmptyString(id) && Number.isSafeInteger(version) && version >= 0)
+            minimumSessionVersions.set(id, version);
         }
+      } else {
+        console.warn('Ignoring old revocation timestamp format; pre-migration JWTs are invalid.');
       }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     dataLoaded = true;
@@ -375,8 +383,8 @@ function createSignalingServer({
   }
 
   function isRevoked(identity) {
-    const revokedAt = revokedUsers.get(identity.userId);
-    return Number.isInteger(revokedAt) && identity.iat <= revokedAt;
+    const minimumVersion = minimumSessionVersions.get(identity.userId) ?? 0;
+    return identity.sessionVersion < minimumVersion;
   }
 
   async function internalPlatformCall(method, route, body) {
@@ -404,11 +412,16 @@ function createSignalingServer({
     return response.ok ? null : 'SERVICE_UNAVAILABLE';
   }
 
-  async function persistRevocations() {
-    await fs.mkdir(dataDirectory, { recursive: true });
-    const temporary = `${revocationsPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    await fs.writeFile(temporary, JSON.stringify(Object.fromEntries(revokedUsers)) + '\n', 'utf8');
-    await fs.rename(temporary, revocationsPath);
+  function persistRevocations() {
+    // Serialize disk writes so an older request cannot overwrite a newer version.
+    const nextWrite = revocationWriteChain.then(async () => {
+      await fs.mkdir(dataDirectory, { recursive: true });
+      const temporary = `${revocationsPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      await fs.writeFile(temporary, JSON.stringify({ schemaVersion: 2, versions: Object.fromEntries(minimumSessionVersions) }) + '\n', 'utf8');
+      await fs.rename(temporary, revocationsPath);
+    });
+    revocationWriteChain = nextWrite.catch(() => {});
+    return nextWrite;
   }
 
   function takeHttpRateLimit(userId) {
@@ -1650,16 +1663,29 @@ function createSignalingServer({
       let userId;
       try { userId = decodeURIComponent(match[1]); } catch { apiError(response, 400, 'BAD_MESSAGE', 'Invalid user ID.'); return; }
       if (!isNonEmptyString(userId) || userId.length > 256) { apiError(response, 400, 'BAD_MESSAGE', 'Invalid user ID.'); return; }
-      // Identical retries keep the same revokedAt (idempotent).
-      const previous = revokedUsers.get(userId);
-      const revokedAt = previous ?? Math.floor(Date.now() / 1000);
-      revokedUsers.set(userId, revokedAt);
+      let payload;
+      try { payload = JSON.parse(await readRequestBody(request)); }
+      catch { apiError(response, 400, 'BAD_MESSAGE', 'Invalid JSON body.'); return; }
+      const requestedVersion = payload?.minSessionVersion;
+      if (!Number.isSafeInteger(requestedVersion) || requestedVersion < 0) {
+        apiError(response, 400, 'BAD_MESSAGE', 'minSessionVersion must be a non-negative integer.'); return;
+      }
+      const previous = minimumSessionVersions.get(userId) ?? 0;
+      const minSessionVersion = Math.max(previous, requestedVersion);
+      minimumSessionVersions.set(userId, minSessionVersion);
       try { await persistRevocations(); }
-      catch (error) { if (previous === undefined) revokedUsers.delete(userId); apiError(response, 500, 'INTERNAL_ERROR', 'Could not persist revocation.'); return; }
-      const matching = [...wss.clients].filter(ws => ws.userId === userId);
+      catch (error) {
+        // Do not undo a higher version set by another concurrent request.
+        if (minimumSessionVersions.get(userId) === minSessionVersion) {
+          if (previous === 0) minimumSessionVersions.delete(userId);
+          else minimumSessionVersions.set(userId, previous);
+        }
+        apiError(response, 500, 'INTERNAL_ERROR', 'Could not persist revocation.'); return;
+      }
+      const matching = [...wss.clients].filter(ws => ws.userId === userId && ws.sessionVersion < minSessionVersion);
       for (const ws of matching) sendError(ws, 'INVALID_TOKEN', 'Your session was revoked. Log in again.', 4001);
-      recordAudit({ username: 'platform', role: 'system' }, 'user-revoke', null, userId, { connections: matching.length });
-      sendJson(response, 200, { ok: true, disconnected: matching.length, revokedAt: new Date(revokedAt * 1000).toISOString() });
+      recordAudit({ username: 'platform', role: 'system' }, 'user-revoke', null, userId, { connections: matching.length, minSessionVersion });
+      sendJson(response, 200, { ok: true, disconnected: matching.length, minSessionVersion });
       return;
     }
     apiError(response, 404, 'NOT_FOUND', 'Internal endpoint not found.');
@@ -1730,7 +1756,7 @@ function createSignalingServer({
         return;
       }
       const token = jwt.sign(
-        { userId: crypto.randomUUID(), username: payload.username.trim(), role },
+        { userId: crypto.randomUUID(), username: payload.username.trim(), role, sessionVersion: 0 },
         secret,
         { algorithm: 'HS256', expiresIn: '1h' },
       );
@@ -1809,6 +1835,7 @@ function createSignalingServer({
       ws.userId = identity.userId;
       ws.username = identity.username;
       ws.role = identity.role;
+      ws.sessionVersion = identity.sessionVersion;
       ws.room = null;
       ws.joinedAt = null;
       ws.mediaStates = new Map();

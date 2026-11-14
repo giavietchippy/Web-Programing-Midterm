@@ -24,7 +24,7 @@ if (!secret) {
   process.exit(1);
 }
 
-const token = jwt.sign({ userId: crypto.randomUUID(), username: username.trim(), role }, secret, {
+const token = jwt.sign({ userId: crypto.randomUUID(), username: username.trim(), role, sessionVersion: 0 }, secret, {
   algorithm: 'HS256',
   expiresIn: '1h',
 });
